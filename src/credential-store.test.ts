@@ -9,7 +9,11 @@ import {
     REFRESH_BUSY_MESSAGE,
     type CredentialStoreDeps,
 } from "./credential-store.ts"
-import { ClaudeCliUnavailable, ClaudeRefreshAborted } from "./claude-cli.ts"
+import {
+    ClaudeCliUnavailable,
+    ClaudeRefreshAborted,
+    ClaudeTerminationUnconfirmed,
+} from "./claude-cli.ts"
 import type { ClaudeCredentials } from "./keychain.ts"
 import type { FutileRefresh } from "./futile-refresh.ts"
 
@@ -317,28 +321,121 @@ test("an unrunnable claude CLI is reported as such and not remembered", async ()
     assert.equal((await store.ensureFresh(SOURCE)).accessToken, "fresh")
 })
 
-test("losing the lock mid-refresh waits for the process that took it", async () => {
+test("ensureFresh: confirmed timeout is transient and does not mark login futile", async () => {
     const { world, deps, store } = makeWorld(EXPIRED)
-    deps.runClaudeRefresh = async (signal) => {
+    deps.runClaudeRefresh = async () => {
+        throw new ClaudeRefreshAborted("incomplete rotation")
+    }
+    await assert.rejects(store.ensureFresh(SOURCE), ClaudeRefreshAborted)
+    assert.equal(world.marker, null)
+    assert.equal(world.lockedByUs, false)
+})
+
+test("ensureFresh: unconfirmed termination retains barrier", async () => {
+    const { world, deps, store } = makeWorld(EXPIRED)
+    deps.runClaudeRefresh = async () => {
+        throw new ClaudeTerminationUnconfirmed("uncertain")
+    }
+    await assert.rejects(
+        store.ensureFresh(SOURCE),
+        ClaudeTerminationUnconfirmed,
+    )
+    assert.equal(world.lockedByUs, true)
+    assert.equal(world.marker, null)
+})
+
+function deferred<T>() {
+    let resolve!: (value: T) => void
+    let reject!: (error: Error) => void
+    const promise = new Promise<T>((yes, no) => {
+        resolve = yes
+        reject = no
+    })
+    return { promise, resolve, reject }
+}
+
+test("aborted before ownership never takes lock or launches CLI", async () => {
+    const { world, deps, store } = makeWorld(EXPIRED)
+    let acquisitions = 0
+    deps.acquireRefreshLock = () => {
+        acquisitions++
+        return null
+    }
+    const caller = new AbortController()
+    caller.abort(new Error("caller canceled"))
+    await assert.rejects(
+        store.ensureFresh(SOURCE, caller.signal),
+        /caller canceled/,
+    )
+    assert.equal(acquisitions, 0)
+    assert.equal(world.refreshRuns, 0)
+})
+
+test("canceled busy waiter never launches later", async () => {
+    const { world, deps, store } = makeWorld(EXPIRED)
+    world.lockHeldByOther = true
+    const sleeping = deferred<void>()
+    deps.sleep = () => sleeping.promise
+    const caller = new AbortController()
+    const result = store.ensureFresh(SOURCE, caller.signal)
+    caller.abort(new Error("cancel waiter"))
+    await assert.rejects(result, /cancel waiter/)
+    world.lockHeldByOther = false
+    sleeping.resolve()
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(world.refreshRuns, 0)
+    assert.equal(world.lockedByUs, false)
+})
+
+test("aborted owner returns promptly but job, reread and marker stay locked", async () => {
+    const { world, deps, store } = makeWorld(EXPIRED)
+    const command = deferred<void>()
+    let ownerSignal: AbortSignal | undefined
+    deps.runClaudeRefresh = (signal) => {
         world.refreshRuns++
-        // Another process took the lock over; refresh-lock.ts aborts us and the
-        // CLI is killed, so nothing was learned about this credential state.
-        world.lockLost.abort()
-        world.lockHeldByOther = true
-        assert.equal(signal.aborted, true)
-        throw new ClaudeRefreshAborted("refresh aborted")
+        ownerSignal = signal
+        return command.promise
     }
-    // That process finishes its refresh while we wait.
-    const sleep = deps.sleep
-    deps.sleep = async (ms) => {
-        await sleep(ms)
+    const writeMarker = deps.writeFutileRefresh
+    deps.writeFutileRefresh = (marker) => {
+        assert.equal(world.lockedByUs, true, "finalization is inside barrier")
+        writeMarker(marker)
+    }
+    const caller = new AbortController()
+    const result = store.ensureFresh(SOURCE, caller.signal)
+    caller.abort(new Error("stop waiting"))
+    await assert.rejects(result, /stop waiting/)
+    assert.equal(world.lockedByUs, true)
+    assert.equal(ownerSignal?.aborted, false)
+    world.write(FRESH)
+    command.resolve()
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(world.lockedByUs, false)
+    assert.equal((await store.ensureFresh(SOURCE)).accessToken, "fresh")
+    assert.equal(world.refreshRuns, 1)
+})
+
+test("abandoned owner rejection is observed and still records unchanged state", async () => {
+    const { world, deps, store } = makeWorld(EXPIRED)
+    const command = deferred<void>()
+    deps.runClaudeRefresh = () => command.promise
+    const caller = new AbortController()
+    const result = store.ensureFresh(SOURCE, caller.signal)
+    caller.abort(new Error("abandon"))
+    await assert.rejects(result, /abandon/)
+    command.reject(new Error("failed command"))
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(world.lockedByUs, false)
+    assert.ok(world.marker)
+})
+
+test("confirmed timeout accepts authoritative fresh reread without futile marker", async () => {
+    const { world, deps, store } = makeWorld(EXPIRED)
+    deps.runClaudeRefresh = async () => {
         world.write(FRESH)
+        throw new ClaudeRefreshAborted("timed out mid-rotation")
     }
-
-    const result = await store.ensureFresh(SOURCE)
-
-    assert.equal(result.accessToken, "fresh")
-    assert.equal(world.refreshRuns, 1, "no second CLI run of our own")
-    assert.equal(world.marker, null, "an aborted run proves nothing")
+    assert.equal((await store.ensureFresh(SOURCE)).accessToken, "fresh")
+    assert.equal(world.marker, null)
     assert.equal(world.lockedByUs, false)
 })

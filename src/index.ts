@@ -179,14 +179,9 @@ const extension = async (pi: ExtensionAPI): Promise<void> => {
         // ("OAuth refresh failed for anthropic: <message>"); pi persists what
         // we return, so there is nothing to write back here.
         //
-        // pi also passes an AbortSignal, which we deliberately ignore: it
-        // merges pi's own 15s refresh timeout with the session's abort signal,
-        // and 15s is shorter than a cold `claude` start, so honouring it would
-        // cancel nearly every delegated refresh. A genuine user abort is
-        // distinguishable (`signal.reason.name === "TimeoutError"` marks the
-        // timeout) if that stall ever needs to become interruptible.
-        async refreshToken(): Promise<OAuthCreds> {
-            return toOAuthCreds(await refreshActiveCredentials())
+        // pi's merged timeout/user signal cancels only this caller's wait.
+        async refreshToken(_credentials, signal): Promise<OAuthCreds> {
+            return toOAuthCreds(await refreshActiveCredentials(signal))
         },
 
         getApiKey(credentials: OAuthCreds): string {

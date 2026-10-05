@@ -15,22 +15,23 @@ pi --version
 
 You should see a version number. pi 0.85 or newer is required.
 
-### Check Claude Code credentials (macOS)
+### Check for stored Claude Code credentials (macOS)
 
 ```bash
-security find-generic-password -s "Claude Code-credentials" -w
+security find-generic-password -s "Claude Code-credentials" >/dev/null
 ```
 
-If this returns credentials, you're authenticated. If it fails or returns
-nothing, try the fallback:
+A successful exit finds the Keychain entry without printing secrets. If it
+fails, try the fallback. These checks find stored credentials; they do not
+prove the login is still valid.
 
 ### Check Claude Code credentials (fallback for all platforms)
 
 ```bash
-cat ~/.claude/.credentials.json
+test -s ~/.claude/.credentials.json
 ```
 
-If this file exists and contains valid JSON, you're authenticated.
+A successful exit finds a non-empty credentials file without printing tokens.
 
 ### If credentials don't exist
 
@@ -96,6 +97,10 @@ selector (`/model` or Ctrl+L), and pick a Claude model. No `/login` or API key
 is required — the extension has already seeded your Claude Code credentials.
 
 ## Upgrading
+
+Stop all pi sessions using this extension, including children, and let any
+delegated Claude CLI finish before updating. Earlier versions use a different
+refresh-lock namespace and cannot safely run alongside this version.
 
 Reinstall to pull the latest `main`:
 

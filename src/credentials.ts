@@ -132,15 +132,18 @@ export function getActiveCredentials(): ClaudeCredentials | null {
  * they are at or near expiry. Throws with an actionable message when no usable
  * credentials can be obtained.
  */
-export async function refreshActiveCredentials(): Promise<ClaudeCredentials> {
+export async function refreshActiveCredentials(
+    signal?: AbortSignal,
+): Promise<ClaudeCredentials> {
     const account = getActiveAccount()
     if (!account) throw new LoginUnusable(NO_CREDENTIALS_MESSAGE)
     try {
-        return await store.ensureFresh(account.source)
+        return await store.ensureFresh(account.source, signal)
     } catch (err) {
         // Only a dead source justifies looking elsewhere. Lock contention or an
         // unrunnable CLI affect every account equally, and switching accounts
         // over them would silently move the user to another subscription.
+        signal?.throwIfAborted()
         if (!(err instanceof LoginUnusable)) throw err
         // The account list is a snapshot from startup. On macOS, logging in
         // again can make Claude Code write a *different* Keychain item, which
@@ -161,7 +164,7 @@ export async function refreshActiveCredentials(): Promise<ClaudeCredentials> {
         // Deliberately not persisted: this is a fallback for an unusable
         // account, not the user's choice in `/login`.
         setActiveAccountSource(replacement.source)
-        return store.ensureFresh(replacement.source)
+        return store.ensureFresh(replacement.source, signal)
     }
 }
 

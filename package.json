@@ -34,7 +34,6 @@
     "scripts": {
         "build": "tsc",
         "test": "node --test --experimental-strip-types src/**/*.test.ts",
-        "test:models": "node --experimental-strip-types scripts/test-models.ts",
         "smoke": "node --experimental-strip-types scripts/smoke-pi-runtime.ts",
         "lint": "oxlint && oxfmt --check .",
         "lint:fix": "oxlint --fix . && oxfmt --write .",

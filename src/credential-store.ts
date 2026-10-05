@@ -2,9 +2,10 @@ import {
     CLAUDE_TIMEOUT_MS,
     ClaudeCliUnavailable,
     ClaudeRefreshAborted,
+    ClaudeTerminationUnconfirmed,
 } from "./claude-cli.ts"
 import type { ClaudeCredentials } from "./keychain.ts"
-import type { DirLock } from "./dir-lock.ts"
+import type { RefreshLock } from "./refresh-lock.ts"
 import type { FutileRefresh } from "./futile-refresh.ts"
 import { log } from "./logger.ts"
 
@@ -21,16 +22,15 @@ export const MIN_VALIDITY_MS = 5 * 60_000
 /**
  * How long a waiter watches for another process's refresh result.
  *
- * Bounded by what actually bounds the holder — the Claude CLI timeout — plus a
- * margin for reading the result. Giving up earlier would turn a refresh that
- * did succeed into a failed request for every waiter, and losing a refresh is
- * worse than waiting for one.
+ * Allows the owner's CLI budget plus finalization time. A caller's signal
+ * may end its wait earlier; an orphan barrier never expires.
  */
 const LOCK_WAIT_MS = CLAUDE_TIMEOUT_MS + 10_000
 const LOCK_POLL_MS = 250
 
 /**
- * The stored Claude Code credentials cannot be used and only a new login helps.
+ * A completed attempt left unusable credentials. A new login or source change
+ * permits another attempt; this is not proof of permanent revocation.
  * Distinct from transient failures (lock contention, an unrunnable CLI), which
  * say nothing about the login and must not trigger fallbacks.
  */
@@ -60,8 +60,8 @@ export interface CredentialStoreDeps {
      * source has no cheap way to detect changes (macOS Keychain).
      */
     stampSource(source: string): string | null
-    /** Try to take the machine-wide refresh lock; null when held elsewhere. */
-    acquireRefreshLock(): DirLock | null
+    /** Try to take the per-user refresh barrier; null when held elsewhere. */
+    acquireRefreshLock(): RefreshLock | null
     /** Delegate a refresh to the Claude CLI; `signal` stops the run. */
     runClaudeRefresh(signal: AbortSignal): Promise<void>
     /** Read the shared record of a refresh that achieved nothing. */
@@ -89,7 +89,7 @@ interface SourceState {
 
 /**
  * Reads Claude Code credentials and, when they expire, has the Claude CLI
- * refresh them — exactly once machine-wide.
+ * refresh them under a shared exclusion barrier.
  *
  * pi is a pure reader here: it never rotates the single-use refresh token,
  * because a second rotator racing Claude Code gets the session revoked.
@@ -145,7 +145,11 @@ export class CredentialStore {
      * the Claude CLI when needed. Throws with an actionable message when no
      * usable credentials can be obtained.
      */
-    async ensureFresh(source: string): Promise<ClaudeCredentials> {
+    async ensureFresh(
+        source: string,
+        signal?: AbortSignal,
+    ): Promise<ClaudeCredentials> {
+        signal?.throwIfAborted()
         const known = this.read(source)
         if (known && this.isFresh(known)) return known
 
@@ -171,7 +175,7 @@ export class CredentialStore {
             throw new LoginUnusable(LOGIN_EXPIRED_MESSAGE)
         }
 
-        return this.delegateRefresh(source)
+        return waitForCaller(this.delegateRefresh(source, signal), signal)
     }
 
     private stateOf(source: string): SourceState {
@@ -200,45 +204,38 @@ export class CredentialStore {
         return snapshot
     }
 
-    private async delegateRefresh(source: string): Promise<ClaudeCredentials> {
+    private async delegateRefresh(
+        source: string,
+        signal?: AbortSignal,
+    ): Promise<ClaudeCredentials> {
         const deadline = this.deps.now() + LOCK_WAIT_MS
         for (;;) {
+            signal?.throwIfAborted()
             const lock = this.deps.acquireRefreshLock()
             if (lock) {
+                // SoC: caller cancellation ends its wait, never the owned job.
+                let release = true
                 try {
-                    return await this.refreshUnderLock(source, lock.signal)
+                    return await this.refreshUnderLock(source)
                 } catch (err) {
-                    if (!(err instanceof ClaudeRefreshAborted)) throw err
-                    // Losing the lock means another process is refreshing right
-                    // now — the exact case this loop waits for. The killed run
-                    // may even have written credentials already, which the
-                    // reload below picks up.
-                    log("refresh_aborted", { source })
+                    if (err instanceof ClaudeTerminationUnconfirmed)
+                        release = false
+                    throw err
                 } finally {
-                    lock.release()
+                    if (release) lock.release()
                 }
             }
-
-            // Another pi process is refreshing. Its result lands in the shared
-            // source, so watch that instead of the lock: we are usually done
-            // before the holder even releases.
             const waited = this.reload(source)
             if (waited.credentials && this.isFresh(waited.credentials)) {
-                log("refresh_by_other_process", { source })
                 return waited.credentials
             }
-            if (this.deps.now() >= deadline) {
-                log("refresh_lock_timeout", { source })
+            if (this.deps.now() >= deadline)
                 throw new Error(REFRESH_BUSY_MESSAGE)
-            }
-            await this.deps.sleep(LOCK_POLL_MS)
+            await waitForCaller(this.deps.sleep(LOCK_POLL_MS), signal)
         }
     }
 
-    private async refreshUnderLock(
-        source: string,
-        lockLost: AbortSignal,
-    ): Promise<ClaudeCredentials> {
+    private async refreshUnderLock(source: string): Promise<ClaudeCredentials> {
         // Double-check under the lock: the previous holder may have just
         // refreshed, in which case a second CLI run would be pure waste.
         const before = this.reload(source)
@@ -267,25 +264,13 @@ export class CredentialStore {
         }
 
         log("refresh_started", { source })
+        let failure: unknown
         try {
-            await this.deps.runClaudeRefresh(lockLost)
+            await this.deps.runClaudeRefresh(new AbortController().signal)
         } catch (err) {
-            // An aborted run tested nothing, so it must not be recorded and
-            // must not be reported as a failure; delegateRefresh waits instead.
-            if (err instanceof ClaudeRefreshAborted) throw err
-            if (err instanceof ClaudeCliUnavailable) {
-                // The CLI never ran, so this says nothing about the login:
-                // recording it would suppress refreshes for a state that was
-                // never actually tried.
-                log("refresh_cli_unavailable", { source, error: err.message })
-                throw new Error(CLAUDE_UNAVAILABLE_MESSAGE, { cause: err })
-            }
-            // A failing CLI can still have refreshed the credentials, so the
-            // re-read below decides, not this error.
-            log("refresh_command_failed", {
-                source,
-                error: err instanceof Error ? err.message : String(err),
-            })
+            failure = err
+            if (err instanceof ClaudeTerminationUnconfirmed) throw err
+            log("refresh_command_failed", { source, error: String(err) })
         }
 
         const after = this.reload(source)
@@ -293,6 +278,12 @@ export class CredentialStore {
             log("refresh_success", { source })
             this.deps.writeFutileRefresh(null)
             return after.credentials
+        }
+
+        // A timeout can interrupt rotation. It cannot prove permanent revocation.
+        if (failure instanceof ClaudeRefreshAborted) throw failure
+        if (failure instanceof ClaudeCliUnavailable) {
+            throw new Error(CLAUDE_UNAVAILABLE_MESSAGE, { cause: failure })
         }
 
         // The CLI left this state as it was. Remember that, so no process asks
@@ -307,7 +298,7 @@ export class CredentialStore {
 
         // Credentials short of our safety margin but not actually expired still
         // work: returning them beats failing the request. The Claude CLI
-        // refreshes for certain once they are past expiry, which changes the
+        // may refresh once they are past expiry. Crossing expiry changes the
         // state and lets the next attempt through.
         if (state.usable && after.credentials) return after.credentials
 
@@ -324,7 +315,7 @@ export class CredentialStore {
  * expiry, and always carries the usability: a token that was merely close to
  * expiry when we asked is a different state once it is actually expired, and
  * asking again is then worth it — the CLI refuses to refresh a token it still
- * considers good, but always refreshes an expired one.
+ * considers good, whereas expiry permits a useful retry.
  */
 function stateOf(snapshot: Snapshot, now: number): SourceState {
     const creds = snapshot.credentials
@@ -334,4 +325,24 @@ function stateOf(snapshot: Snapshot, now: number): SourceState {
         identity: `${base}|${creds ? (usable ? "usable" : "expired") : "missing"}`,
         usable,
     }
+}
+
+/** Observe the owned promise even when the caller abandons its result. */
+function waitForCaller<T>(job: Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (!signal) return job
+    return new Promise((resolve, reject) => {
+        const abort = () => reject(signal.reason)
+        signal.addEventListener("abort", abort, { once: true })
+        job.then(
+            (value) => {
+                signal.removeEventListener("abort", abort)
+                resolve(value)
+            },
+            (error) => {
+                signal.removeEventListener("abort", abort)
+                reject(error)
+            },
+        )
+        if (signal.aborted) abort()
+    })
 }

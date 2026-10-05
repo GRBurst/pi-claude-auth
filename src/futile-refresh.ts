@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
-import { getPiAgentDir } from "./paths.ts"
+import { getClaudeCoordinationDir } from "./paths.ts"
 
 /**
  * Record that asking the Claude CLI to refresh achieved nothing for a specific
@@ -23,7 +23,7 @@ export interface FutileRefresh {
 }
 
 function markerPath(): string {
-    return join(getPiAgentDir(), "claude-refresh-futile.json")
+    return join(getClaudeCoordinationDir(), "futile-refresh.json")
 }
 
 export function readFutileRefresh(): FutileRefresh | null {

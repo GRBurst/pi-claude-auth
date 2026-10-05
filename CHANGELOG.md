@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+- Honor pi's cancellation signal while waiting for credentials. An owned refresh
+  continues independently through CLI completion and credential re-read; it
+  never writes pi's `auth.json` in the background.
+- Share refresh coordination across pi profiles in `~/.claude/pi-claude-auth/`.
+  The refresh lock has no time-based takeover. Crashes or uncertain CLI
+  termination require manual recovery; see `README.md#refresh-lock-recovery`.
+- Reject existing empty, malformed, and non-object `auth.json` contents without
+  overwriting them. Only a missing file initializes an empty object.
+
+### Changed
+
+- Stop old extension processes and let delegated CLIs finish before upgrading:
+  the old and new refresh-lock locations do not coordinate.
+- Remove the stale supported-model table and live model-probing script. pi owns
+  the model catalog; account availability remains Anthropic's decision.
+- Remove unused upstream GitNexus instructions and skills.
+
 ## 0.4.0
 
 Claude Code is now the only writer of its credentials; pi only reads them.

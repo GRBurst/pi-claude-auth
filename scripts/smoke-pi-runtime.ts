@@ -178,11 +178,13 @@ function expiredLoginRun(): void {
 
         // The lock must be gone: release correctness inside pi's runtime is
         // exactly what the node tests cannot reach.
-        if (existsSync(join(home, ".pi", "agent", "claude-refresh.lock"))) {
+        if (
+            existsSync(join(home, ".claude", "pi-claude-auth", "refresh.lock"))
+        ) {
             fail("expired login: the refresh lock was left behind", output)
         }
 
-        // Advisory only: the match is machine-wide, so another pi refreshing
+        // Advisory only: the process match covers the whole user, so another pi refreshing
         // right now would look like our leftover.
         if (countClaudeProcesses() > before) {
             console.warn(
@@ -214,15 +216,37 @@ function realCredentialsRun(): void {
         return
     }
 
-    const { output } = run("reply PONG and nothing else", {
-        ...process.env,
-        PATH: SMOKE_PATH,
-    })
-    assertNoCrash(output, "real credentials", false)
-    if (!output.includes("PONG")) {
-        fail("real credentials: no model reply", output)
+    // The expiry precheck is not a lifecycle guarantee: startup could cross
+    // the threshold. A failing stub makes real token rotation impossible.
+    const guard = mkdtempSync(join(tmpdir(), "pi-claude-auth-smoke-guard-"))
+    try {
+        const invoked = join(guard, "refresh-attempted")
+        const stub = join(guard, "claude")
+        writeFileSync(
+            stub,
+            '#!/bin/sh\nprintf invoked > "$PI_SMOKE_REFRESH_GUARD"\nexit 1\n',
+            { mode: 0o700 },
+        )
+        const { output } = run("reply PONG and nothing else", {
+            ...process.env,
+            PATH: `${guard}:${SMOKE_PATH}`,
+            PI_SMOKE_REFRESH_GUARD: invoked,
+        })
+        if (existsSync(invoked)) {
+            fail(
+                "real credentials: refresh blocked by safety stub; retry after checking login",
+                output,
+            )
+        }
+        assertNoCrash(output, "real credentials", false)
+        if (!output.includes("PONG"))
+            fail("real credentials: no model reply", output)
+        console.log(
+            "ok  real credentials: authenticated against Anthropic (refresh guarded)",
+        )
+    } finally {
+        rmSync(guard, { recursive: true, force: true })
     }
-    console.log("ok  real credentials: authenticated against Anthropic")
 }
 
 expiredLoginRun()
