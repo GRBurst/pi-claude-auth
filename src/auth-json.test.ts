@@ -180,3 +180,31 @@ test("seedAnthropicCredential: sweeps temp files a crashed writer left", async (
         [],
     )
 })
+
+for (const raw of [
+    "",
+    " \n\t",
+    "{broken",
+    "[]",
+    "null",
+    "123",
+    '"scalar"',
+    "true",
+]) {
+    test(`auth.json malformed/nonobject stays byte-identical: ${JSON.stringify(raw)}`, async () => {
+        writeFileSync(authPath, raw)
+        const original = readFileSync(authPath)
+        await assert.rejects(seedAnthropicCredential(CREDS))
+        assert.deepEqual(readFileSync(authPath), original)
+        await assert.rejects(removeSeededCredential())
+        assert.deepEqual(readFileSync(authPath), original)
+    })
+}
+
+test("auth.json accepts pi-compatible leading BOM", async () => {
+    writeFileSync(authPath, '\ufeff{"other":{"token":"fake"}}')
+    await seedAnthropicCredential(CREDS)
+    assert.deepEqual(JSON.parse(readFileSync(authPath, "utf-8")).other, {
+        token: "fake",
+    })
+})

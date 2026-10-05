@@ -191,12 +191,23 @@ function sweepTempFiles(dir: string): void {
 }
 
 function readAuthJson(path: string): Record<string, unknown> {
-    if (!existsSync(path)) return {}
-    // Under the lock no writer is mid-write, so a parse error is a genuinely
-    // broken file. Rebuilding from {} would silently drop other providers'
-    // credentials, so the caller sees the error instead.
-    return JSON.parse(readFileSync(path, "utf-8") || "{}") as Record<
-        string,
-        unknown
-    >
+    let text: string
+    try {
+        text = readFileSync(path, "utf-8")
+    } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") return {}
+        throw err
+    }
+    const parsed: unknown = JSON.parse(
+        text.charCodeAt(0) === 0xfeff ? text.slice(1) : text,
+    )
+    // Parse, don't validate: only an actual object becomes the writable record.
+    if (
+        typeof parsed !== "object" ||
+        parsed === null ||
+        Array.isArray(parsed)
+    ) {
+        throw new Error("auth.json must contain an object")
+    }
+    return Object.fromEntries(Object.entries(parsed))
 }
