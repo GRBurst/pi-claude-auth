@@ -121,7 +121,7 @@ test("Unix wrapper close with ordinary group child retains real barrier", async 
         )
         assert.equal(
             acquireRefreshLock(),
-            null,
+            "held",
             "close cannot permit another owner while group lives",
         )
     } finally {
@@ -164,3 +164,33 @@ function stopTestGroup(pid: number): void {
         if ((err as NodeJS.ErrnoException).code !== "ESRCH") throw err
     }
 }
+
+import { chmodSync, writeFileSync } from "node:fs"
+import { refreshViaClaudeCli } from "./claude-cli.ts"
+
+test("a CLI the lock could not record is stopped, not left running", async (t) => {
+    if (process.platform === "win32") {
+        t.skip("shell stub")
+        return
+    }
+    // A stub `claude` on PATH: no real CLI, no tokens.
+    const bin = mkdtempSync(join(tmpdir(), "pi-fake-claude-"))
+    writeFileSync(join(bin, "claude"), "#!/bin/sh\nexec sleep 30\n")
+    chmodSync(join(bin, "claude"), 0o755)
+    const oldPath = process.env.PATH
+    process.env.PATH = `${bin}:${oldPath}`
+    let spawned: number | undefined
+    try {
+        await assert.rejects(
+            refreshViaClaudeCli(new AbortController().signal, (pid) => {
+                spawned = pid
+                throw new Error("record write failed")
+            }),
+            ClaudeRefreshAborted,
+        )
+        assert.throws(() => process.kill(-spawned!, 0), { code: "ESRCH" })
+    } finally {
+        process.env.PATH = oldPath
+        rmSync(bin, { recursive: true, force: true })
+    }
+})

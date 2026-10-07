@@ -8,8 +8,12 @@
   continues independently through CLI completion and credential re-read; it
   never writes pi's `auth.json` in the background.
 - Share refresh coordination across pi profiles in `~/.claude/pi-claude-auth/`.
-  The refresh lock has no time-based takeover. Crashes or uncertain CLI
-  termination require manual recovery; see `README.md#refresh-lock-recovery`.
+  The refresh lock has no time-based takeover. A lock whose recorded owner and
+  delegated CLI are provably dead is taken over automatically; anything
+  unprovable fails fast with the manual recovery step, see
+  `README.md#refresh-lock-recovery`.
+- Report a refresh outlasting pi's 15s refresh timeout as still running instead
+  of "The operation timed out".
 - Reject existing empty, malformed, and non-object `auth.json` contents without
   overwriting them. Only a missing file initializes an empty object.
 

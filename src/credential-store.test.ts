@@ -7,6 +7,7 @@ import {
     LoginUnusable,
     MIN_VALIDITY_MS,
     REFRESH_BUSY_MESSAGE,
+    STALE_REFRESH_LOCK_MESSAGE,
     type CredentialStoreDeps,
 } from "./credential-store.ts"
 import {
@@ -41,7 +42,6 @@ function makeWorld(initial: ClaudeCredentials | null) {
         refreshRuns: 0,
         lockHeldByOther: false,
         lockedByUs: false,
-        lockLost: new AbortController(),
         marker: null as FutileRefresh | null,
         slept: 0,
         now: NOW,
@@ -62,11 +62,10 @@ function makeWorld(initial: ClaudeCredentials | null) {
         },
         stampSource: () => world.stamp,
         acquireRefreshLock: () => {
-            if (world.lockHeldByOther) return null
+            if (world.lockHeldByOther) return "held"
             world.lockedByUs = true
-            world.lockLost = new AbortController()
             return {
-                signal: world.lockLost.signal,
+                recordCli: () => {},
                 release: () => {
                     world.lockedByUs = false
                 },
@@ -185,6 +184,69 @@ test("ensureFresh: a permanently busy lock fails as transient, without spawning"
         return true
     })
     assert.equal(world.refreshRuns, 0)
+})
+
+test("ensureFresh: no CLI launches when its pending record cannot be written", async () => {
+    const { world, deps, store } = makeWorld(EXPIRED)
+    const acquire = deps.acquireRefreshLock
+    deps.acquireRefreshLock = () => {
+        const lock = acquire()
+        if (typeof lock !== "object") return lock
+        return {
+            ...lock,
+            recordCli: () => {
+                throw new Error("disk full")
+            },
+        }
+    }
+    await assert.rejects(store.ensureFresh(SOURCE), /disk full/)
+    assert.equal(world.refreshRuns, 0)
+    assert.equal(world.lockedByUs, false)
+})
+
+test("ensureFresh: an unprovable lock fails fast with the recovery step", async () => {
+    const { world, deps, store } = makeWorld(EXPIRED)
+    let attempts = 0
+    deps.acquireRefreshLock = () => {
+        attempts++
+        return "unprovable"
+    }
+    await assert.rejects(store.ensureFresh(SOURCE), {
+        message: STALE_REFRESH_LOCK_MESSAGE,
+    })
+    assert.equal(attempts, 2, "one re-check skips transient states")
+    assert.equal(world.refreshRuns, 0)
+})
+
+test("ensureFresh: a transient unprovable lock is waited out", async () => {
+    const { world, deps, store } = makeWorld(EXPIRED)
+    const acquire = deps.acquireRefreshLock
+    const answers: ("held" | "unprovable")[] = [
+        "unprovable",
+        "held",
+        "unprovable",
+    ]
+    deps.acquireRefreshLock = () => answers.shift() ?? acquire()
+    assert.equal((await store.ensureFresh(SOURCE)).accessToken, "fresh")
+    assert.equal(world.refreshRuns, 1)
+})
+
+test("ensureFresh: the owner records the spawned CLI in its lock", async () => {
+    const { deps, store } = makeWorld(EXPIRED)
+    const acquire = deps.acquireRefreshLock
+    const recorded: (number | "pending")[] = []
+    deps.acquireRefreshLock = () => {
+        const lock = acquire()
+        if (typeof lock !== "object") return lock
+        return { ...lock, recordCli: (cli) => recorded.push(cli) }
+    }
+    const run = deps.runClaudeRefresh
+    deps.runClaudeRefresh = async (signal, onSpawn) => {
+        onSpawn(4242)
+        await run(signal, onSpawn)
+    }
+    await store.ensureFresh(SOURCE)
+    assert.deepEqual(recorded, ["pending", 4242])
 })
 
 test("ensureFresh: still-expired after the refresh reports an expired login", async () => {
@@ -354,12 +416,21 @@ function deferred<T>() {
     return { promise, resolve, reject }
 }
 
+/** pi's abort (its hard refresh timeout) surfaces as the busy message. */
+function busyBecause(reason: string) {
+    return (err: Error) => {
+        assert.equal(err.message, REFRESH_BUSY_MESSAGE)
+        assert.equal((err.cause as Error).message, reason)
+        return true
+    }
+}
+
 test("aborted before ownership never takes lock or launches CLI", async () => {
     const { world, deps, store } = makeWorld(EXPIRED)
     let acquisitions = 0
     deps.acquireRefreshLock = () => {
         acquisitions++
-        return null
+        return "held"
     }
     const caller = new AbortController()
     caller.abort(new Error("caller canceled"))
@@ -379,7 +450,7 @@ test("canceled busy waiter never launches later", async () => {
     const caller = new AbortController()
     const result = store.ensureFresh(SOURCE, caller.signal)
     caller.abort(new Error("cancel waiter"))
-    await assert.rejects(result, /cancel waiter/)
+    await assert.rejects(result, busyBecause("cancel waiter"))
     world.lockHeldByOther = false
     sleeping.resolve()
     await new Promise((resolve) => setImmediate(resolve))
@@ -404,7 +475,7 @@ test("aborted owner returns promptly but job, reread and marker stay locked", as
     const caller = new AbortController()
     const result = store.ensureFresh(SOURCE, caller.signal)
     caller.abort(new Error("stop waiting"))
-    await assert.rejects(result, /stop waiting/)
+    await assert.rejects(result, busyBecause("stop waiting"))
     assert.equal(world.lockedByUs, true)
     assert.equal(ownerSignal?.aborted, false)
     world.write(FRESH)
@@ -422,7 +493,7 @@ test("abandoned owner rejection is observed and still records unchanged state", 
     const caller = new AbortController()
     const result = store.ensureFresh(SOURCE, caller.signal)
     caller.abort(new Error("abandon"))
-    await assert.rejects(result, /abandon/)
+    await assert.rejects(result, busyBecause("abandon"))
     command.reject(new Error("failed command"))
     await new Promise((resolve) => setImmediate(resolve))
     assert.equal(world.lockedByUs, false)

@@ -13,12 +13,15 @@ pi extension that reads Claude Code OAuth credentials. Requires pi 0.85+.
   refresh lock through command completion and authoritative re-read. No
   background `auth.json` writes or canceled-caller account switching.
 - **Refresh coordination is per Claude store, not per pi profile.** Lock and
-  futile-attempt record live in `~/.claude/pi-claude-auth/`. The lock has no
-  time-based takeover; uncertain termination or owner crashes retain the barrier.
-  Recovery requires confirming no participating owner or delegated CLI remains.
-  Unix completion covers direct-child close plus its original process-group
-  probe; Windows covers the direct child only. Escaped/detached descendants and
-  independently launched Claude processes are outside this guarantee.
+  futile-attempt record live in `~/.claude/pi-claude-auth/`. The lock never
+  expires. A waiter takes it over only on proof: the owner PID recorded in the
+  lock is dead and so is the recorded CLI (its process group on Unix). A
+  missing or corrupt record, a CLI launch without recorded PID, or a failed
+  probe retains the barrier and fails fast with the manual recovery step.
+  Takeover removes only the instance it judged stale (see `src/refresh-lock.ts`). Unix completion covers direct-child close
+  plus its original process-group probe; Windows covers the direct child only.
+  Escaped/detached descendants and independently launched Claude processes are
+  outside this guarantee.
 - **pi's `auth.json` keeps pi's locking protocol.** Only a missing file may
   initialize an empty object. Reject invalid/non-object contents without changing
   them; preserve unrelated providers and replace valid contents atomically.
@@ -35,7 +38,7 @@ pi extension that reads Claude Code OAuth credentials. Requires pi 0.85+.
 | `src/keychain.ts` | Claude credentials from macOS Keychain or file |
 | `src/claude-cli.ts` | Delegated CLI execution and its independent timeout |
 | `src/dir-lock.ts` | pi-compatible directory lock for `auth.json` |
-| `src/refresh-lock.ts` | Non-expiring exclusion for extension-launched refreshes |
+| `src/refresh-lock.ts` | Non-expiring exclusion for extension-launched refreshes; owner record, proof-based takeover |
 | `src/futile-refresh.ts` | Shared unchanged-attempt record; not proof of revocation |
 | `src/auth-json.ts` | Seed/remove pi credentials, parsing boundary, atomic writes |
 | `src/paths.ts` | Credential, pi-profile, and shared-coordination paths |

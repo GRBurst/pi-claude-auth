@@ -5,7 +5,7 @@ import {
     ClaudeTerminationUnconfirmed,
 } from "./claude-cli.ts"
 import type { ClaudeCredentials } from "./keychain.ts"
-import type { RefreshLock } from "./refresh-lock.ts"
+import type { RefreshLock, RefreshLockBusy } from "./refresh-lock.ts"
 import type { FutileRefresh } from "./futile-refresh.ts"
 import { log } from "./logger.ts"
 
@@ -20,10 +20,9 @@ import { log } from "./logger.ts"
 export const MIN_VALIDITY_MS = 5 * 60_000
 
 /**
- * How long a waiter watches for another process's refresh result.
- *
- * Allows the owner's CLI budget plus finalization time. A caller's signal
- * may end its wait earlier; an orphan barrier never expires.
+ * How long a waiter without a caller signal watches for another process's
+ * refresh result: the owner's CLI budget plus finalization time. pi's own
+ * signal usually ends the wait much earlier (see ensureFresh).
  */
 const LOCK_WAIT_MS = CLAUDE_TIMEOUT_MS + 10_000
 const LOCK_POLL_MS = 250
@@ -40,7 +39,10 @@ export const LOGIN_EXPIRED_MESSAGE =
     "Claude Code login expired or revoked. Run `claude` and log in, then retry."
 
 export const REFRESH_BUSY_MESSAGE =
-    "Another pi process is refreshing the Claude Code credentials. Retry in a moment."
+    "A Claude Code credential refresh is still running. Retry in a moment."
+
+export const STALE_REFRESH_LOCK_MESSAGE =
+    "The Claude Code refresh lock ~/.claude/pi-claude-auth/refresh.lock has no provable owner. If no pi or `claude` refresh is running, delete it and retry."
 
 export const CLAUDE_UNAVAILABLE_MESSAGE =
     "Could not run the `claude` CLI to refresh the Claude Code credentials. Make sure it is installed and on PATH."
@@ -60,10 +62,16 @@ export interface CredentialStoreDeps {
      * source has no cheap way to detect changes (macOS Keychain).
      */
     stampSource(source: string): string | null
-    /** Try to take the per-user refresh barrier; null when held elsewhere. */
-    acquireRefreshLock(): RefreshLock | null
-    /** Delegate a refresh to the Claude CLI; `signal` stops the run. */
-    runClaudeRefresh(signal: AbortSignal): Promise<void>
+    /** Try to take the per-user refresh barrier, or say why it is busy. */
+    acquireRefreshLock(): RefreshLock | RefreshLockBusy
+    /**
+     * Delegate a refresh to the Claude CLI; `signal` stops the run, `onSpawn`
+     * receives the CLI pid and stops the run by throwing.
+     */
+    runClaudeRefresh(
+        signal: AbortSignal,
+        onSpawn: (pid: number) => void,
+    ): Promise<void>
     /** Read the shared record of a refresh that achieved nothing. */
     readFutileRefresh(): FutileRefresh | null
     /** Record a futile refresh, or clear the record when passed null. */
@@ -175,7 +183,21 @@ export class CredentialStore {
             throw new LoginUnusable(LOGIN_EXPIRED_MESSAGE)
         }
 
-        return waitForCaller(this.delegateRefresh(source, signal), signal)
+        try {
+            return await waitForCaller(
+                this.delegateRefresh(source, signal),
+                signal,
+            )
+        } catch (err) {
+            // pi 1.0.4 bounds refreshToken with a hard 15s AbortSignal.timeout
+            // (DEFAULT_OAUTH_REFRESH_TIMEOUT_MS), shorter than a cold CLI run
+            // or a wait for another owner. Its bare "The operation timed out"
+            // hides that a refresh is still in flight; say so instead.
+            if (signal?.aborted && err === signal.reason) {
+                throw new Error(REFRESH_BUSY_MESSAGE, { cause: err })
+            }
+            throw err
+        }
     }
 
     private stateOf(source: string): SourceState {
@@ -209,14 +231,15 @@ export class CredentialStore {
         signal?: AbortSignal,
     ): Promise<ClaudeCredentials> {
         const deadline = this.deps.now() + LOCK_WAIT_MS
+        let unprovable = 0
         for (;;) {
             signal?.throwIfAborted()
             const lock = this.deps.acquireRefreshLock()
-            if (lock) {
+            if (typeof lock === "object") {
                 // SoC: caller cancellation ends its wait, never the owned job.
                 let release = true
                 try {
-                    return await this.refreshUnderLock(source)
+                    return await this.refreshUnderLock(source, lock)
                 } catch (err) {
                     if (err instanceof ClaudeTerminationUnconfirmed)
                         release = false
@@ -229,13 +252,21 @@ export class CredentialStore {
             if (waited.credentials && this.isFresh(waited.credentials)) {
                 return waited.credentials
             }
+            // A lock without provable owner cannot resolve itself. Twice in a
+            // row skips transient states (an owner between mkdir and writing
+            // its record, another waiter's takeover in progress).
+            unprovable = lock === "unprovable" ? unprovable + 1 : 0
+            if (unprovable >= 2) throw new Error(STALE_REFRESH_LOCK_MESSAGE)
             if (this.deps.now() >= deadline)
                 throw new Error(REFRESH_BUSY_MESSAGE)
             await waitForCaller(this.deps.sleep(LOCK_POLL_MS), signal)
         }
     }
 
-    private async refreshUnderLock(source: string): Promise<ClaudeCredentials> {
+    private async refreshUnderLock(
+        source: string,
+        lock: RefreshLock,
+    ): Promise<ClaudeCredentials> {
         // Double-check under the lock: the previous holder may have just
         // refreshed, in which case a second CLI run would be pure waste.
         const before = this.reload(source)
@@ -264,9 +295,15 @@ export class CredentialStore {
         }
 
         log("refresh_started", { source })
+        // Before spawning: a crash between spawn and recording the pid must
+        // leave a lock that waiters cannot prove stale.
+        lock.recordCli("pending")
         let failure: unknown
         try {
-            await this.deps.runClaudeRefresh(new AbortController().signal)
+            await this.deps.runClaudeRefresh(
+                new AbortController().signal,
+                (pid) => lock.recordCli(pid),
+            )
         } catch (err) {
             failure = err
             if (err instanceof ClaudeTerminationUnconfirmed) throw err
