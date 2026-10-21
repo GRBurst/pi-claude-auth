@@ -106,13 +106,17 @@ test("read: re-reads only when the source stamp changed", () => {
     assert.equal(world.reads, 2)
 })
 
-test("read: keeps the in-memory copy for sources without a stamp", () => {
+test("read: re-reads every time when the source has no stamp", () => {
     const { world, deps, store } = makeWorld(FRESH)
-    deps.stampSource = () => null // macOS Keychain: no cheap change check
+    deps.stampSource = () => null // keychain file not known: cannot validate
 
     store.read(SOURCE)
     store.read(SOURCE)
-    assert.equal(world.reads, 1)
+    assert.equal(world.reads, 2)
+
+    // Another process rotated the token; a stale copy would be revoked.
+    world.write(creds(NOW + 3_600_000, "rotated"))
+    assert.equal(store.read(SOURCE)?.accessToken, "rotated")
 })
 
 test("ensureFresh: valid credentials never spawn a refresh", async () => {

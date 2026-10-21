@@ -14,6 +14,7 @@ import {
 } from "./credential-store.ts"
 import { acquireRefreshLock } from "./refresh-lock.ts"
 import {
+    keychainContainerPath,
     readAccountCredentials,
     readAllClaudeAccounts,
     type ClaudeAccount,
@@ -29,22 +30,27 @@ export type { ClaudeAccount } from "./keychain.ts"
 let activeAccountSource: string | null = null
 let allAccounts: ClaudeAccount[] = []
 
-/**
- * Change token for a credential source.
- *
- * The credentials file gets mtime and size, which is one stat call and makes an
- * external rewrite (the Claude CLI refreshing) immediately visible. The macOS
- * Keychain has no equivalent cheap check — reading it costs a `security`
- * subprocess — so it returns null, meaning "no cheap change detection".
- */
-function stampSource(source: string): string | null {
-    if (source !== "file") return null
+/** mtime and size of a file; "absent" while it does not exist. */
+function statStamp(path: string): string {
     try {
-        const stats = statSync(getClaudeCredentialsPath())
+        const stats = statSync(path)
         return `${stats.mtimeMs}:${stats.size}`
     } catch {
         return "absent"
     }
+}
+
+/**
+ * Change token for a credential source: one stat of the file that stores it, so
+ * an external rewrite (the Claude CLI or another pi process refreshing) is
+ * visible to every instance on its next request. The credentials file is its
+ * own container; a Keychain item lives in a keychain file. Null means "cannot
+ * tell", which makes the store re-read instead of trusting its copy.
+ */
+function stampSource(source: string): string | null {
+    if (source === "file") return statStamp(getClaudeCredentialsPath())
+    const container = keychainContainerPath(source)
+    return container === null ? null : statStamp(container)
 }
 
 const store = new CredentialStore({

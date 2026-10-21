@@ -8,6 +8,7 @@ import {
     claudeCredentialsAbsent,
     decodeSource,
     encodeSource,
+    parseKeychainContainer,
     parseKeychainDump,
 } from "./keychain.ts"
 
@@ -176,4 +177,20 @@ test("claudeCredentialsAbsent: an unreadable credentials file is not absence", (
     mkdirSync(join(homeDir, ".claude"), { recursive: true })
     writeFileSync(join(homeDir, ".claude", ".credentials.json"), "{ broken")
     assert.equal(claudeCredentialsAbsent(), false)
+})
+
+test("parseKeychainContainer: reads the keychain file path", () => {
+    const output = [
+        'keychain: "/Users/me/Library/Keychains/login.keychain-db"',
+        "version: 512",
+        'class: "genp"',
+    ].join("\n")
+    assert.equal(
+        parseKeychainContainer(output),
+        "/Users/me/Library/Keychains/login.keychain-db",
+    )
+})
+
+test("parseKeychainContainer: null when the output names no keychain", () => {
+    assert.equal(parseKeychainContainer("unexpected"), null)
 })

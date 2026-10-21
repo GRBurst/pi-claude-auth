@@ -58,8 +58,8 @@ export interface CredentialStoreDeps {
     /** Read the credentials a source currently holds. */
     readSource(source: string): ClaudeCredentials | null
     /**
-     * Cheap change token for a source (file: mtime and size), or null when the
-     * source has no cheap way to detect changes (macOS Keychain).
+     * Cheap change token for a source (mtime and size of the file storing it),
+     * or null when it cannot be determined; null forces a re-read.
      */
     stampSource(source: string): string | null
     /** Try to take the per-user refresh barrier; "held" when someone has it. */
@@ -109,18 +109,14 @@ export class CredentialStore {
      * changed; never spawns anything, so it is safe on the request path.
      */
     read(source: string): ClaudeCredentials | null {
+        const stamp = this.deps.stampSource(source)
         const cached = this.snapshots.get(source)
-        if (cached && cached.stamp !== null) {
-            // A source with a stamp (the credentials file) is re-read only
-            // when it actually changed. Keychain sources have no stamp, so this
-            // read never re-reads them; ensureFresh does, on expiry.
-            if (this.deps.stampSource(source) === cached.stamp) {
-                return cached.credentials
-            }
-        } else if (cached) {
+        // A copy is trusted only while its stamp is known and unchanged: no
+        // stamp means no proof that it is still the token Claude Code holds.
+        if (cached && stamp !== null && stamp === cached.stamp) {
             return cached.credentials
         }
-        return this.reload(source).credentials
+        return this.reload(source, stamp).credentials
     }
 
     /** Drop the in-memory copy, e.g. after the user switched accounts. */
@@ -208,12 +204,14 @@ export class CredentialStore {
         return creds.expiresAt > this.deps.now() + MIN_VALIDITY_MS
     }
 
-    private reload(source: string): Snapshot {
+    private reload(
+        source: string,
+        stamp: string | null = this.deps.stampSource(source),
+    ): Snapshot {
         // Stamp before content: if the source changes in between, the stamp we
         // stored is the older one and the next read sees a mismatch and
         // re-reads. The reverse order could cache new content under an old
         // stamp and miss the change.
-        const stamp = this.deps.stampSource(source)
         const credentials = this.deps.readSource(source)
         const snapshot = { stamp, credentials }
         this.snapshots.set(source, snapshot)

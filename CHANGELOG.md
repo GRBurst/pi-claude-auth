@@ -4,6 +4,10 @@
 
 ### Fixes
 
+- macOS: pick up a token rotated by another process immediately. Keychain
+  credentials were cached until their own expiry, so long-lived instances
+  (subagents, idle sessions) kept sending the revoked token ("OAuth access token
+  has been revoked"). The Keychain database's mtime now serves as change check.
 - Honor pi's cancellation signal while waiting for credentials. An owned refresh
   continues independently through CLI completion and credential re-read; it
   never writes pi's `auth.json` in the background.

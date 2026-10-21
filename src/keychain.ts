@@ -250,6 +250,48 @@ function readKeychainService(ref: KeychainRef | string): string | null {
 }
 
 /**
+ * Path of the keychain file holding a Keychain item, from the `keychain: "..."`
+ * line that `security find-generic-password` prints without `-w`.
+ *
+ * Exported for testing.
+ */
+export function parseKeychainContainer(output: string): string | null {
+    return /^keychain: "(.+)"$/m.exec(output)?.[1] ?? null
+}
+
+// Where an item lives does not change while pi runs, and finding out costs a
+// `security` subprocess, so only successes are remembered.
+const containers = new Map<string, string>()
+
+/**
+ * The file that physically stores a Keychain-backed source, or null when macOS
+ * did not tell us. Any write to the item (a token rotation by any process)
+ * rewrites that file, so its mtime is the cheap change check the Keychain
+ * itself lacks: a `stat` instead of a `security` subprocess per request.
+ * Fails safe (Correctness by Construction): null makes CredentialStore re-read
+ * the source on every call rather than trust a copy it cannot validate.
+ */
+export function keychainContainerPath(source: string): string | null {
+    const known = containers.get(source)
+    if (known) return known
+    const { service, account } = decodeSource(source)
+    const args = ["find-generic-password", "-s", service]
+    if (account) args.push("-a", account)
+    try {
+        const output = execFileSync("/usr/bin/security", args, {
+            timeout: 2000,
+            encoding: "utf-8",
+            stdio: ["pipe", "pipe", "pipe"],
+        })
+        const path = parseKeychainContainer(output)
+        if (path) containers.set(source, path)
+        return path
+    } catch {
+        return null
+    }
+}
+
+/**
  * Every Claude Code Keychain item, or null when the Keychain could not be
  * enumerated at all. Null is not "there are none": callers that delete things
  * need that difference (see claudeCredentialsAbsent).

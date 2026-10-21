@@ -333,9 +333,10 @@ revocation.
 
 - Reads all `Claude Code-credentials*` Keychain entries on macOS (labeled by
   subscription tier), falling back to `~/.claude/.credentials.json`
-- Re-reads the credentials file when its mtime or size changed (one `stat`),
-  so a refresh by Claude Code or another pi process is picked up immediately.
-  The Keychain has no cheap equivalent, so those sources are re-read on expiry
+- Re-reads the credentials when the file storing them changed (mtime or size,
+  one `stat`), so a refresh by Claude Code or another pi process is picked up
+  immediately. For a Keychain item that file is the keychain database `security`
+  reports for it; when it is unknown, the Keychain is read on every request
 - Seeds `~/.pi/agent/auth.json` with `{ type: "oauth", access, refresh: "",
 expires }` under `anthropic`, holding the same `<file>.lock` directory pi's
   own locking uses, and replacing the file through a rename
