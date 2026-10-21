@@ -25,7 +25,8 @@ import {
     type ClaudeAccount,
 } from "./keychain.ts"
 import { initLogger, log } from "./logger.ts"
-import { buildUserAgent } from "./signing.ts"
+import { readClaudeCliVersion } from "./claude-cli.ts"
+import { buildUserAgent, setInstalledCliVersion } from "./signing.ts"
 import { injectBillingHeader } from "./transforms.ts"
 
 export { seedAnthropicCredential } from "./auth-json.ts"
@@ -73,6 +74,10 @@ function toOAuthCreds(creds: ClaudeCredentials): OAuthCreds {
  */
 const extension = async (pi: ExtensionAPI): Promise<void> => {
     initLogger()
+
+    // Started first so the ~0.5s CLI start overlaps the credential reads and
+    // seeding below; awaited only where the version is needed. Never rejects.
+    const installedVersion = readClaudeCliVersion()
 
     let accounts: ClaudeAccount[] = []
     try {
@@ -200,6 +205,7 @@ const extension = async (pi: ExtensionAPI): Promise<void> => {
     // `claude-cli/<version>`, which Anthropic's plan-billing validation does
     // not accept — without this the request bills against extra usage instead
     // of the subscription plan.
+    setInstalledCliVersion(await installedVersion)
     pi.registerProvider(PROVIDER_ID, {
         oauth,
         headers: { "user-agent": buildUserAgent() },

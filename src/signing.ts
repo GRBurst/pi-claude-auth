@@ -2,20 +2,27 @@ import { createHash } from "node:crypto"
 
 const BILLING_SALT = "59cf53e54c78"
 
-// Claude Code CLI version used for the billing header AND the overridden
-// user-agent. The billing header's cc_version must match the user-agent
-// version for Anthropic's subscription-billing validation to route the request
-// to the Claude Pro/Max plan instead of pay-as-you-go / extra usage.
-// Overridable via ANTHROPIC_CLI_VERSION.
-export const CC_VERSION = "2.1.280"
+// Fallback Claude Code CLI version, used when the installed one cannot be read
+// (see readClaudeCliVersion in src/claude-cli.ts). The billing header's
+// cc_version must match the user-agent version for Anthropic's
+// subscription-billing validation to route the request to the Claude Pro/Max
+// plan instead of pay-as-you-go / extra usage.
+export const CC_VERSION = "2.1.299"
+
+let installedVersion: string | null = null
+
+/** Record the version of the installed Claude Code CLI (set once at init). */
+export function setInstalledCliVersion(version: string | null): void {
+    installedVersion = version
+}
 
 // Billing entrypoint, mirrored in the user-agent's `(external, <entrypoint>)`
 // suffix. Overridable via CLAUDE_CODE_ENTRYPOINT.
 export const CC_ENTRYPOINT = "sdk-cli"
 
-/** Resolve the Claude Code CLI version (env override wins). */
+/** Resolve the Claude Code CLI version: env override, installed CLI, fallback. */
 export function getCliVersion(): string {
-    return process.env.ANTHROPIC_CLI_VERSION ?? CC_VERSION
+    return process.env.ANTHROPIC_CLI_VERSION ?? installedVersion ?? CC_VERSION
 }
 
 /** Resolve the billing entrypoint (env override wins). */

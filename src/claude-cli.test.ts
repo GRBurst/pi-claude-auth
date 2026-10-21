@@ -1,6 +1,10 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { buildRefreshEnv } from "./claude-cli.ts"
+import {
+    buildRefreshEnv,
+    parseClaudeVersion,
+    readClaudeCliVersion,
+} from "./claude-cli.ts"
 
 test("buildRefreshEnv: drops auth sources that outrank the OAuth login", () => {
     const env = buildRefreshEnv({
@@ -83,7 +87,7 @@ test("runner timeout is incomplete refresh, not permanent revocation", async () 
 })
 
 import { spawn } from "node:child_process"
-import { mkdtempSync, rmSync } from "node:fs"
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { acquireRefreshLock } from "./refresh-lock.ts"
@@ -164,3 +168,48 @@ function stopTestGroup(pid: number): void {
         if ((err as NodeJS.ErrnoException).code !== "ESRCH") throw err
     }
 }
+
+test("parseClaudeVersion: takes the leading semver", () => {
+    assert.equal(parseClaudeVersion("2.1.299 (Claude Code)\n"), "2.1.299")
+    assert.equal(parseClaudeVersion("2.1.299"), "2.1.299")
+})
+
+test("parseClaudeVersion: rejects anything else", () => {
+    assert.equal(parseClaudeVersion(""), null)
+    assert.equal(parseClaudeVersion("error: nope"), null)
+    assert.equal(parseClaudeVersion("2.1.299-evil\r\nx-injected: 1"), null)
+})
+
+// A fake `claude` on PATH: no real CLI, no real credentials.
+async function withFakeClaude<T>(
+    script: string | null,
+    run: () => Promise<T>,
+): Promise<T> {
+    const dir = mkdtempSync(join(tmpdir(), "fake-claude-"))
+    const prevPath = process.env.PATH
+    if (script !== null) {
+        const bin = join(dir, "claude")
+        writeFileSync(bin, `#!/bin/sh\n${script}\n`)
+        chmodSync(bin, 0o755)
+    }
+    process.env.PATH = dir
+    try {
+        return await run()
+    } finally {
+        process.env.PATH = prevPath
+        rmSync(dir, { recursive: true, force: true })
+    }
+}
+
+test("readClaudeCliVersion: reads stdout, ignores a stderr banner", async () => {
+    const version = await withFakeClaude(
+        'echo banner >&2; echo "4.5.6 (Claude Code)"',
+        readClaudeCliVersion,
+    )
+    assert.equal(version, "4.5.6")
+})
+
+test("readClaudeCliVersion: null when the CLI is missing or fails", async () => {
+    assert.equal(await withFakeClaude(null, readClaudeCliVersion), null)
+    assert.equal(await withFakeClaude("exit 1", readClaudeCliVersion), null)
+})

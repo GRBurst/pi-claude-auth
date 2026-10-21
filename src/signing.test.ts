@@ -7,6 +7,7 @@ import {
     computeCch,
     computeVersionSuffix,
     extractFirstUserMessageText,
+    setInstalledCliVersion,
 } from "./signing.ts"
 
 const prevUa = process.env.ANTHROPIC_USER_AGENT
@@ -17,6 +18,7 @@ afterEach(() => {
     restore("ANTHROPIC_USER_AGENT", prevUa)
     restore("ANTHROPIC_CLI_VERSION", prevVer)
     restore("CLAUDE_CODE_ENTRYPOINT", prevEntry)
+    setInstalledCliVersion(null)
 })
 
 function restore(key: string, value: string | undefined): void {
@@ -84,7 +86,7 @@ test("buildUserAgent: default Claude Code form", () => {
     delete process.env.ANTHROPIC_USER_AGENT
     delete process.env.ANTHROPIC_CLI_VERSION
     delete process.env.CLAUDE_CODE_ENTRYPOINT
-    assert.equal(buildUserAgent(), "claude-cli/2.1.280 (external, sdk-cli)")
+    assert.equal(buildUserAgent(), "claude-cli/2.1.299 (external, sdk-cli)")
 })
 
 test("buildUserAgent: honors version and entrypoint overrides", () => {
@@ -97,4 +99,19 @@ test("buildUserAgent: honors version and entrypoint overrides", () => {
 test("buildUserAgent: full override wins", () => {
     process.env.ANTHROPIC_USER_AGENT = "custom-agent/1.0"
     assert.equal(buildUserAgent(), "custom-agent/1.0")
+})
+
+test("buildUserAgent: installed CLI version beats the fallback", () => {
+    delete process.env.ANTHROPIC_USER_AGENT
+    delete process.env.ANTHROPIC_CLI_VERSION
+    delete process.env.CLAUDE_CODE_ENTRYPOINT
+    setInstalledCliVersion("3.0.1")
+    assert.equal(buildUserAgent(), "claude-cli/3.0.1 (external, sdk-cli)")
+})
+
+test("buildUserAgent: env override beats the installed CLI version", () => {
+    delete process.env.ANTHROPIC_USER_AGENT
+    process.env.ANTHROPIC_CLI_VERSION = "9.9.9"
+    setInstalledCliVersion("3.0.1")
+    assert.match(buildUserAgent(), /^claude-cli\/9\.9\.9 /)
 })

@@ -239,13 +239,15 @@ outside this coordination guarantee.
 Forced termination during token rotation can still require a new Claude Code
 login; the extension cannot make the server exchange crash-atomic.
 
-### Claude Code version pinning
+### Claude Code version
 
-The Claude Code version is pinned to `2.1.280` for billing header computation.
-If billing reverts to extra usage after a Claude Code update, override:
+The billing header and user-agent carry the version printed by `claude --version`,
+read once at startup. If `claude` cannot be run, the extension falls back to
+`2.1.299`. If billing reverts to extra usage after a Claude Code update,
+override:
 
 ```bash
-export ANTHROPIC_CLI_VERSION=<new-version>
+export ANTHROPIC_CLI_VERSION=<version>
 ```
 
 or reinstall to pull the latest `main`:
@@ -281,11 +283,11 @@ unset PI_CLAUDE_AUTH_DEBUG
 
 ## Environment variables
 
-| Variable                | Description                                                             | Default       |
-| ----------------------- | ----------------------------------------------------------------------- | ------------- |
-| `PI_CODING_AGENT_DIR`   | pi's config directory (where `auth.json` lives)                         | `~/.pi/agent` |
-| `PI_CLAUDE_AUTH_DEBUG`  | Enable diagnostic logging (`1` for default path, or a custom file path) | disabled      |
-| `ANTHROPIC_CLI_VERSION` | Claude CLI version for billing headers                                  | `2.1.280`     |
+| Variable                | Description                                                             | Default                            |
+| ----------------------- | ----------------------------------------------------------------------- | ---------------------------------- |
+| `PI_CODING_AGENT_DIR`   | pi's config directory (where `auth.json` lives)                         | `~/.pi/agent`                      |
+| `PI_CLAUDE_AUTH_DEBUG`  | Enable diagnostic logging (`1` for default path, or a custom file path) | disabled                           |
+| `ANTHROPIC_CLI_VERSION` | Claude CLI version for billing headers                                  | `claude --version`, else `2.1.299` |
 
 ## How it works
 

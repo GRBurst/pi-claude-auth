@@ -25,6 +25,9 @@
 
 ### Changed
 
+- Send the installed Claude Code version (`claude --version`, read once at
+  startup) in the billing header and user-agent instead of a hardcoded one; the
+  pinned `2.1.299` is only the fallback.
 - Stop old extension processes and let delegated CLIs finish before upgrading:
   the old and new refresh-lock locations do not coordinate.
 - Remove the stale supported-model table and live model-probing script. pi owns

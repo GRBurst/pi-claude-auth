@@ -224,7 +224,9 @@ function realCredentialsRun(): void {
         const stub = join(guard, "claude")
         writeFileSync(
             stub,
-            '#!/bin/sh\nprintf invoked > "$PI_SMOKE_REFRESH_GUARD"\nexit 1\n',
+            // `--version` is the extension's read-only version lookup, not a
+            // refresh; every other invocation counts as a refresh attempt.
+            '#!/bin/sh\n[ "$1" = "--version" ] && { echo "2.1.299 (Claude Code)"; exit 0; }\nprintf invoked > "$PI_SMOKE_REFRESH_GUARD"\nexit 1\n',
             { mode: 0o700 },
         )
         const { output } = run("reply PONG and nothing else", {

@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process"
+import { execFile, spawn, type ChildProcess } from "node:child_process"
 import { tmpdir } from "node:os"
 
 /**
@@ -50,6 +50,43 @@ export function buildRefreshEnv(
     const env: NodeJS.ProcessEnv = { ...base, TERM: "dumb" }
     for (const name of OVERRIDING_AUTH_VARS) delete env[name]
     return env
+}
+
+/** Bound for `claude --version`: a cold, sandbox-wrapped start takes ~0.5s. */
+const VERSION_TIMEOUT_MS = 3_000
+
+/**
+ * Semver at the start of `claude --version` output ("2.1.299 (Claude Code)"),
+ * or null for anything else. Parse, don't validate: the version ends up in
+ * request headers, so only a well-formed one may pass.
+ *
+ * Pure, exported for testing.
+ */
+export function parseClaudeVersion(stdout: string): string | null {
+    return /^(\d+\.\d+\.\d+)(?:\s|$)/.exec(stdout.trim())?.[1] ?? null
+}
+
+/**
+ * The installed Claude Code version, or null when it cannot be determined
+ * (not installed, timeout, unexpected output). Never rejects: callers fall back
+ * to a pinned version (src/signing.ts), so a missing CLI must not break startup.
+ */
+export function readClaudeCliVersion(): Promise<string | null> {
+    return new Promise((resolve) => {
+        // Argument array, no shell; cwd=tmpdir as in refreshViaClaudeCli.
+        execFile(
+            "claude",
+            ["--version"],
+            {
+                cwd: tmpdir(),
+                timeout: VERSION_TIMEOUT_MS,
+                encoding: "utf-8",
+                windowsHide: true,
+            },
+            (error, stdout) =>
+                resolve(error ? null : parseClaudeVersion(stdout)),
+        )
+    })
 }
 
 /**
