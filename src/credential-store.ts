@@ -5,7 +5,7 @@ import {
     ClaudeTerminationUnconfirmed,
 } from "./claude-cli.ts"
 import type { ClaudeCredentials } from "./keychain.ts"
-import type { RefreshLock, RefreshLockBusy } from "./refresh-lock.ts"
+import type { RefreshLock } from "./refresh-lock.ts"
 import type { FutileRefresh } from "./futile-refresh.ts"
 import { log } from "./logger.ts"
 
@@ -38,11 +38,11 @@ export class LoginUnusable extends Error {}
 export const LOGIN_EXPIRED_MESSAGE =
     "Claude Code login expired or revoked. Run `claude` and log in, then retry."
 
+// A crashed owner strands the lock and nothing can tell it from a running one,
+// so the busy answer carries the recovery step. A healthy refresh ends within
+// CLAUDE_TIMEOUT_MS (1 minute), hence the time bound on the advice.
 export const REFRESH_BUSY_MESSAGE =
-    "A Claude Code credential refresh is still running. Retry in a moment."
-
-export const STALE_REFRESH_LOCK_MESSAGE =
-    "The Claude Code refresh lock ~/.claude/pi-claude-auth/refresh.lock has no provable owner. If no pi or `claude` refresh is running, delete it and retry."
+    "A Claude Code credential refresh is still running. Retry in a moment. If this persists for over 2 minutes and no pi or `claude` refresh is running, delete ~/.claude/pi-claude-auth/refresh.lock (its `owner` file shows when it was taken)."
 
 export const CLAUDE_UNAVAILABLE_MESSAGE =
     "Could not run the `claude` CLI to refresh the Claude Code credentials. Make sure it is installed and on PATH."
@@ -62,16 +62,10 @@ export interface CredentialStoreDeps {
      * source has no cheap way to detect changes (macOS Keychain).
      */
     stampSource(source: string): string | null
-    /** Try to take the per-user refresh barrier, or say why it is busy. */
-    acquireRefreshLock(): RefreshLock | RefreshLockBusy
-    /**
-     * Delegate a refresh to the Claude CLI; `signal` stops the run, `onSpawn`
-     * receives the CLI pid and stops the run by throwing.
-     */
-    runClaudeRefresh(
-        signal: AbortSignal,
-        onSpawn: (pid: number) => void,
-    ): Promise<void>
+    /** Try to take the per-user refresh barrier; "held" when someone has it. */
+    acquireRefreshLock(): RefreshLock | "held"
+    /** Delegate a refresh to the Claude CLI; `signal` stops the run. */
+    runClaudeRefresh(signal: AbortSignal): Promise<void>
     /** Read the shared record of a refresh that achieved nothing. */
     readFutileRefresh(): FutileRefresh | null
     /** Record a futile refresh, or clear the record when passed null. */
@@ -231,7 +225,6 @@ export class CredentialStore {
         signal?: AbortSignal,
     ): Promise<ClaudeCredentials> {
         const deadline = this.deps.now() + LOCK_WAIT_MS
-        let unprovable = 0
         for (;;) {
             signal?.throwIfAborted()
             const lock = this.deps.acquireRefreshLock()
@@ -239,7 +232,7 @@ export class CredentialStore {
                 // SoC: caller cancellation ends its wait, never the owned job.
                 let release = true
                 try {
-                    return await this.refreshUnderLock(source, lock)
+                    return await this.refreshUnderLock(source)
                 } catch (err) {
                     if (err instanceof ClaudeTerminationUnconfirmed)
                         release = false
@@ -252,21 +245,13 @@ export class CredentialStore {
             if (waited.credentials && this.isFresh(waited.credentials)) {
                 return waited.credentials
             }
-            // A lock without provable owner cannot resolve itself. Twice in a
-            // row skips transient states (an owner between mkdir and writing
-            // its record, another waiter's takeover in progress).
-            unprovable = lock === "unprovable" ? unprovable + 1 : 0
-            if (unprovable >= 2) throw new Error(STALE_REFRESH_LOCK_MESSAGE)
             if (this.deps.now() >= deadline)
                 throw new Error(REFRESH_BUSY_MESSAGE)
             await waitForCaller(this.deps.sleep(LOCK_POLL_MS), signal)
         }
     }
 
-    private async refreshUnderLock(
-        source: string,
-        lock: RefreshLock,
-    ): Promise<ClaudeCredentials> {
+    private async refreshUnderLock(source: string): Promise<ClaudeCredentials> {
         // Double-check under the lock: the previous holder may have just
         // refreshed, in which case a second CLI run would be pure waste.
         const before = this.reload(source)
@@ -295,15 +280,9 @@ export class CredentialStore {
         }
 
         log("refresh_started", { source })
-        // Before spawning: a crash between spawn and recording the pid must
-        // leave a lock that waiters cannot prove stale.
-        lock.recordCli("pending")
         let failure: unknown
         try {
-            await this.deps.runClaudeRefresh(
-                new AbortController().signal,
-                (pid) => lock.recordCli(pid),
-            )
+            await this.deps.runClaudeRefresh(new AbortController().signal)
         } catch (err) {
             failure = err
             if (err instanceof ClaudeTerminationUnconfirmed) throw err

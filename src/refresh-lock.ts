@@ -3,8 +3,8 @@ import {
     mkdirSync,
     readFileSync,
     renameSync,
-    rmdirSync,
     rmSync,
+    statSync,
     writeFileSync,
 } from "node:fs"
 import { dirname, join } from "node:path"
@@ -12,205 +12,105 @@ import { log } from "./logger.ts"
 import { getRefreshLockTarget } from "./paths.ts"
 
 /**
- * Exclusion barrier for extension-launched refreshes. It never expires: a
- * paused owner is not a dead one. It is taken over only on proof that its
- * owner and its delegated CLI are gone (see takeOverIfStale).
+ * Exclusion barrier for extension-launched refreshes: at most one delegated
+ * `claude` run per Claude store (a second rotator of the single-use refresh
+ * token gets the login revoked).
+ *
+ * It never expires and is never taken over. Nothing can prove an owner dead
+ * across processes: pids are meaningful only inside one PID namespace
+ * (sandboxed pi sessions each get their own), liveness by file lock would free
+ * the barrier while an orphaned CLI still rotates, and time cannot tell a
+ * suspended owner from a dead one. A barrier stranded by a crashed owner is
+ * removed by hand (README, "Refresh lock recovery"). A wrong release costs a
+ * revoked login, a stranded lock costs one `rm`: fail closed (Inversion).
  */
 export interface RefreshLock {
-    /**
-     * Record the delegated CLI so waiters can prove it stopped: "pending"
-     * before spawning, then its pid. Throws on failure.
-     */
-    recordCli(cli: CliRecord): void
     release(): void
 }
 
 /**
- * Why a lock could not be acquired:
- * - "held": a live owner or its CLI may still be refreshing; waiting can help.
- * - "unprovable": nothing proves who holds it (record missing or corrupt, a
- *   liveness probe failed, or another waiter's takeover is in progress);
- *   waiting can only help if this is a transient state.
+ * The lock's only content: "<nonce> <acquisition time>". It makes a published
+ * lock never empty (see acquireRefreshLock) and names the instance, so an
+ * owner whose lock was removed by hand cannot release a successor's lock.
  */
-export type RefreshLockBusy = "held" | "unprovable"
-
-/**
- * The delegated CLI: "pending" from just before spawn until its pid is
- * recorded. An owner dying in that window leaves a CLI nobody can probe.
- */
-export type CliRecord = number | "pending"
-
-/** What a lock dir says about its holder. `nonce` names this lock instance. */
-export interface OwnerRecord {
-    pid: number
-    nonce: string
-    cli?: CliRecord
-}
-
-const RECORD = "owner"
+const OWNER_FILE = "owner"
 
 export function refreshLockPath(): string {
     return `${getRefreshLockTarget()}.lock`
 }
 
-export function acquireRefreshLock(): RefreshLock | RefreshLockBusy {
+/**
+ * Acquire the exclusion barrier, or return "held" when someone else has it.
+ *
+ * The lock is published, never created in place: a claim dir holding the
+ * OWNER_FILE file is renamed onto the lock path. Rename is atomic, so the lock
+ * exists only complete, and exactly one of several concurrent publishers wins:
+ * renaming onto an existing non-empty dir fails. A crash mid-acquisition
+ * strands an unpublished claim dir, which excludes nobody.
+ *
+ * Only an empty lock dir could be replaced. This protocol never publishes
+ * one, so an empty dir is a relic of a pre-publish version whose owner is
+ * gone (stop old extension processes before upgrading, see AGENTS.md).
+ */
+export function acquireRefreshLock(): RefreshLock | "held" {
     const path = refreshLockPath()
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
-    // One takeover per call at most; a lock re-taken in between is just held.
-    for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-            mkdirSync(path, { mode: 0o700 })
-        } catch (err) {
-            if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err
-            const verdict = takeOverIfStale(path)
-            if (verdict === "removed") continue
-            return verdict
-        }
-        return ownLock(path)
-    }
-    return "held"
-}
-
-function ownLock(path: string): RefreshLock {
-    const owner: OwnerRecord = { pid: process.pid, nonce: randomUUID() }
+    // A sibling of the lock path keeps the rename on one filesystem.
+    const nonce = randomUUID()
+    const claim = `${getRefreshLockTarget()}.claim-${nonce}`
+    mkdirSync(claim, { mode: 0o700 })
     try {
-        writeRecord(path, owner)
+        writeFileSync(
+            join(claim, OWNER_FILE),
+            `${nonce} ${new Date().toISOString()}`,
+            { mode: 0o600 },
+        )
+        renameSync(claim, path)
     } catch (err) {
-        // A record-less lock would block every waiter until manual recovery.
-        removeLockDir(path)
+        try {
+            rmSync(claim, { recursive: true, force: true })
+        } catch {
+            /* Unpublished garbage blocks no one. */
+        }
+        // POSIX: a non-empty target refuses the rename. Windows reports other
+        // codes for the same refusal, so fall back to looking at the path.
+        // The owner may release between the refusal and the look: still held.
+        const code = (err as NodeJS.ErrnoException).code
+        if (code === "ENOTEMPTY" || code === "EEXIST" || exists(path))
+            return "held"
         throw err
     }
-    return {
-        recordCli(cli) {
-            writeRecord(path, { ...owner, cli })
-        },
-        release() {
-            // Only this owner removes its barrier. Renaming first removes the
-            // whole instance atomically, including a waiter's stray claim dir.
-            removeLockDir(path)
-        },
+    return { release: () => release(path, nonce) }
+}
+
+/** Whether a path exists, telling "missing" (ENOENT) from real failure. */
+function exists(path: string): boolean {
+    try {
+        statSync(path)
+        return true
+    } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") return false
+        throw err
     }
 }
 
 /**
- * Remove the lock at `path` if its record proves the holder is gone.
- *
- * Proof, never time (Inversion: a stolen live lock means two refresh-token
- * rotations and a revoked login, so every uncertainty keeps the barrier):
- * - the owner PID is dead (ESRCH), and
- * - the recorded CLI is dead too; on Unix its whole process group, because
- *   src/claude-cli.ts spawns it detached (pgid = pid).
- * PID reuse can only make a dead holder look alive, which keeps the barrier.
+ * Atomically detach our lock instance, then delete it. Never throws. A lock
+ * that is not ours any more (removed by hand, then re-acquired) stays.
+ * The check-then-rename gap needs a manual removal and a new acquisition
+ * within microseconds; closing it would need a primitive we do not have.
  */
-function takeOverIfStale(path: string): RefreshLockBusy | "removed" {
-    const record = readRecord(path)
-    if (!record) return "unprovable"
-    const owner = liveness(record.pid)
-    if (owner !== "dead") return owner
-    if (record.cli === "pending") return "unprovable"
-    if (record.cli !== undefined) {
-        const cli = liveness(
-            process.platform === "win32" ? record.cli : -record.cli,
-        )
-        if (cli !== "dead") return cli
-    }
-    return removeStaleInstance(path, record)
-}
-
-/**
- * Remove the lock at `path` only if it still holds exactly the record `stale`
- * that was proven dead. Since that read, another waiter may have removed it and
- * a new owner re-created it, or the owner may have recorded a CLI and then died.
- *
- * The claim dir is named after the stale instance's nonce, so exactly one
- * waiter claims that instance. The owner was dead before the claim, so the
- * record re-read after claiming is final; if it equals `stale`, the proof
- * holds for the instance at `path`. From then on nothing else changes it
- * (mkdir cannot replace an existing dir, other claimers are excluded), so the
- * rename detaches exactly the proven-stale instance.
- */
-export function removeStaleInstance(
-    path: string,
-    stale: OwnerRecord,
-): RefreshLockBusy | "removed" {
-    const claim = join(path, `claim-${stale.nonce}`)
-    try {
-        mkdirSync(claim)
-    } catch (err) {
-        // ENOENT: the lock is gone, acquisition may simply be retried.
-        if ((err as NodeJS.ErrnoException).code === "ENOENT") return "removed"
-        // EEXIST: another waiter is removing this instance right now.
-        return "unprovable"
-    }
-    const current = readRecord(path)
-    if (
-        current?.nonce !== stale.nonce ||
-        current.pid !== stale.pid ||
-        current.cli !== stale.cli
-    ) {
-        // A fresh lock or a newer record than the proof covers. Withdraw.
-        try {
-            rmdirSync(claim)
-        } catch {
-            /* Its owner may have released it meanwhile. */
-        }
-        return "held"
-    }
-    log("refresh_lock_taken_over", { ...stale })
-    return removeLockDir(path) ? "removed" : "unprovable"
-}
-
-function liveness(pid: number): RefreshLockBusy | "dead" {
-    try {
-        process.kill(pid, 0)
-        return "held"
-    } catch (err) {
-        const code = (err as NodeJS.ErrnoException).code
-        if (code === "ESRCH") return "dead"
-        // EPERM: the process exists, it just is not ours.
-        return code === "EPERM" ? "held" : "unprovable"
-    }
-}
-
-function readRecord(path: string): OwnerRecord | null {
-    let value: unknown
-    try {
-        value = JSON.parse(readFileSync(join(path, RECORD), "utf8"))
-    } catch {
-        return null
-    }
-    // Parse, don't validate: the nonce becomes a path segment.
-    const { pid, nonce, cli } = (value ?? {}) as Record<string, unknown>
-    if (!isPid(pid) || typeof nonce !== "string") return null
-    if (!/^[0-9a-f-]{36}$/.test(nonce)) return null
-    if (cli === undefined) return { pid, nonce }
-    if (cli !== "pending" && !isPid(cli)) return null
-    return { pid, nonce, cli }
-}
-
-function isPid(value: unknown): value is number {
-    return Number.isSafeInteger(value) && (value as number) > 0
-}
-
-function writeRecord(path: string, record: OwnerRecord): void {
-    // Atomic replace: a reader sees the old or the new record, never a torn one.
-    const tmp = join(path, `${RECORD}.tmp`)
-    writeFileSync(tmp, JSON.stringify(record), { mode: 0o600 })
-    renameSync(tmp, join(path, RECORD))
-}
-
-/** Atomically detach the lock instance, then delete it. */
-function removeLockDir(path: string): boolean {
+function release(path: string, nonce: string): void {
     const grave = `${path}.removed-${randomUUID()}`
     try {
+        const owner = readFileSync(join(path, OWNER_FILE), "utf8")
+        if (!owner.startsWith(nonce)) return
         renameSync(path, grave)
-    } catch {
-        return false
-    }
-    try {
         rmSync(grave, { recursive: true, force: true })
-    } catch {
-        /* A leftover detached dir no longer excludes anyone. */
+    } catch (err) {
+        // A failed rename (e.g. a Windows handle inside the dir) strands the
+        // barrier; leave a trace, since every waiter then reports "busy".
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT")
+            log("refresh_lock_release_failed", { error: String(err) })
     }
-    return true
 }

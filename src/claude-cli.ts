@@ -65,17 +65,10 @@ export function buildRefreshEnv(
  * The owner's signal can stop the run; request cancellation never reaches it.
  * The refresh barrier stays held until completion is confirmed.
  *
- * `onSpawn` receives the CLI pid (its process group id on Unix) so the refresh
- * lock can record it. If recording fails, the CLI is stopped: an unrecorded CLI
- * could outlive its owner and let a waiter take over the lock while it runs.
- *
  * Rejects when the CLI cannot be started, is aborted, times out, or exits
  * non-zero.
  */
-export function refreshViaClaudeCli(
-    signal: AbortSignal,
-    onSpawn: (pid: number) => void,
-): Promise<void> {
+export function refreshViaClaudeCli(signal: AbortSignal): Promise<void> {
     if (signal.aborted)
         return Promise.reject(new ClaudeRefreshAborted("refresh aborted"))
     // Argument array (no shell) keeps the attack surface minimal.
@@ -103,13 +96,6 @@ export function refreshViaClaudeCli(
     const stop = new AbortController()
     const onAbort = () => stop.abort(signal.reason)
     signal.addEventListener("abort", onAbort, { once: true })
-    if (child.pid) {
-        try {
-            onSpawn(child.pid)
-        } catch {
-            stop.abort()
-        }
-    }
     return waitForClaudeCompletion(child, stop.signal).finally(() =>
         signal.removeEventListener("abort", onAbort),
     )

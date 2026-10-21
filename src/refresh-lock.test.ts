@@ -1,26 +1,18 @@
 import assert from "node:assert/strict"
 import { spawn } from "node:child_process"
-import { randomUUID } from "node:crypto"
 import { once } from "node:events"
 import {
     existsSync,
     mkdirSync,
     mkdtempSync,
     readdirSync,
-    readFileSync,
     rmSync,
     utimesSync,
-    writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, test } from "node:test"
-import {
-    acquireRefreshLock,
-    refreshLockPath,
-    removeStaleInstance,
-    type OwnerRecord,
-} from "./refresh-lock.ts"
+import { acquireRefreshLock, refreshLockPath } from "./refresh-lock.ts"
 import { getRefreshLockTarget } from "./paths.ts"
 import { readFutileRefresh, writeFutileRefresh } from "./futile-refresh.ts"
 
@@ -69,30 +61,6 @@ function child(profile: string) {
     )
 }
 
-/** The pid of a process that has exited (a reused pid only fails closed). */
-async function deadPid(): Promise<number> {
-    const proc = spawn(process.execPath, ["-e", ""], { stdio: "ignore" })
-    await once(proc, "exit")
-    return proc.pid!
-}
-
-/** Plant a lock as some other process would have left it. */
-function plantLock(record: Partial<OwnerRecord> | string | null): string {
-    const path = refreshLockPath()
-    mkdirSync(path, { recursive: true })
-    if (record !== null) {
-        writeFileSync(
-            join(path, "owner"),
-            typeof record === "string" ? record : JSON.stringify(record),
-        )
-    }
-    return path
-}
-
-function readOwner(path: string): OwnerRecord {
-    return JSON.parse(readFileSync(join(path, "owner"), "utf8"))
-}
-
 test("same HOME profiles share lock and futile record; an old live lock is held", () => {
     const path = getRefreshLockTarget()
     const lock = acquireRefreshLock()
@@ -102,121 +70,65 @@ test("same HOME profiles share lock and futile record; an old live lock is held"
     writeFutileRefresh(marker)
     process.env.PI_CODING_AGENT_DIR = join(home, "profile-b")
     assert.equal(getRefreshLockTarget(), path)
-    assert.equal(acquireRefreshLock(), "held", "owner alive: barrier kept")
+    assert.equal(acquireRefreshLock(), "held", "time never frees the barrier")
     assert.deepEqual(readFutileRefresh(), marker)
     ;(lock as { release(): void }).release()
     assert.equal(existsSync(`${path}.lock`), false)
     assert.equal(readdirSync(join(home, ".claude", "pi-claude-auth")).length, 1)
 })
 
-test("real owner death without a CLI lets a waiter take over", async () => {
+test("a dead owner keeps the barrier: death cannot be proven across processes", async () => {
     const owner = child("profile-a")
     try {
         const [owned] = await once(owner.stdout, "data")
         assert.match(String(owned), /owned/)
-        const waiter = child("profile-b")
-        const waiterExit = once(waiter, "exit")
-        const [busy] = await once(waiter.stdout, "data")
-        assert.match(String(busy), /held/)
-        await waiterExit
         const ownerExit = once(owner, "exit")
         owner.kill("SIGKILL")
         await ownerExit
-        const lock = acquireRefreshLock()
-        assert.equal(typeof lock, "object", "dead owner: takeover")
-        assert.equal(readOwner(refreshLockPath()).pid, process.pid)
+        assert.equal(acquireRefreshLock(), "held")
     } finally {
         owner.kill("SIGKILL")
     }
 })
 
-test("dead owner with a live CLI process group keeps the barrier", async (t) => {
-    const cli = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], {
-        detached: process.platform !== "win32",
-        stdio: "ignore",
-    })
-    try {
-        const path = plantLock({
-            pid: await deadPid(),
-            nonce: randomUUID(),
-            cli: cli.pid!,
-        })
-        assert.equal(acquireRefreshLock(), "held")
-        assert.equal(existsSync(join(path, "owner")), true)
-    } finally {
-        const exit = once(cli, "exit")
-        cli.kill("SIGKILL")
-        await exit
-    }
-    if (process.platform === "win32") return t.skip("process groups")
-    assert.equal(typeof acquireRefreshLock(), "object", "group gone: takeover")
+test("an empty relic of a pre-publish version is replaced", () => {
+    const path = refreshLockPath()
+    mkdirSync(path, { recursive: true })
+    const lock = acquireRefreshLock()
+    assert.equal(typeof lock, "object")
+    assert.equal(acquireRefreshLock(), "held")
 })
 
-test("missing, corrupt or launch-pending records keep the barrier as unprovable", async () => {
-    const path = plantLock(null)
-    assert.equal(acquireRefreshLock(), "unprovable")
-    for (const bad of [
-        "not json",
-        { pid: await deadPid() },
-        { pid: await deadPid(), nonce: "../../escape" },
-        { pid: -1, nonce: randomUUID() },
-        { pid: await deadPid(), nonce: randomUUID(), cli: "1" },
-        // The owner died between spawning the CLI and recording its pid.
-        { pid: await deadPid(), nonce: randomUUID(), cli: "pending" },
-    ]) {
-        plantLock(bad)
-        assert.equal(acquireRefreshLock(), "unprovable", JSON.stringify(bad))
-        assert.equal(existsSync(path), true)
-    }
+test("an unpublished claim dir excludes nobody", () => {
+    mkdirSync(`${getRefreshLockTarget()}.claim-crashed`, { recursive: true })
+    assert.equal(typeof acquireRefreshLock(), "object")
 })
 
-test("a waiter with an outdated stale record cannot remove a fresh lock", async () => {
-    const stale = { pid: await deadPid(), nonce: randomUUID() }
-    const path = plantLock(stale)
-    // Another waiter removed the stale instance and a new owner took the lock
-    // after this waiter read `stale`.
-    assert.equal(removeStaleInstance(path, stale), "removed")
-    const fresh = acquireRefreshLock()
-    assert.equal(typeof fresh, "object")
-    const freshRecord = readOwner(path)
-
-    assert.equal(removeStaleInstance(path, stale), "held")
-    assert.deepEqual(readOwner(path), freshRecord)
-    assert.deepEqual(readdirSync(path), ["owner"], "claim withdrawn")
+test("an owner whose lock was removed by hand does not release its successor", () => {
+    const first = acquireRefreshLock() as { release(): void }
+    rmSync(refreshLockPath(), { recursive: true })
+    const second = acquireRefreshLock() as { release(): void }
+    assert.equal(typeof second, "object")
+    first.release()
+    assert.equal(existsSync(refreshLockPath()), true)
+    second.release()
+    assert.equal(existsSync(refreshLockPath()), false)
 })
 
-test("a record updated after the stale read is not removed", async () => {
-    const owner = await deadPid()
-    const nonce = randomUUID()
-    // The waiter read the record before the owner recorded its CLI and died.
-    for (const cli of ["pending", process.pid] as const) {
-        const path = plantLock({ pid: owner, nonce, cli })
-        assert.equal(removeStaleInstance(path, { pid: owner, nonce }), "held")
-        assert.deepEqual(readOwner(path), { pid: owner, nonce, cli })
-        assert.deepEqual(readdirSync(path), ["owner"], "claim withdrawn")
-    }
-})
-
-test("a second claimer of the same stale instance backs off", async () => {
-    const stale = { pid: await deadPid(), nonce: randomUUID() }
-    const path = plantLock(stale)
-    mkdirSync(join(path, `claim-${stale.nonce}`))
-    assert.equal(removeStaleInstance(path, stale), "unprovable")
-    assert.deepEqual(readOwner(path), stale)
-})
-
-test("concurrent waiters on a stale lock: exactly one takes over", async () => {
-    plantLock({ pid: await deadPid(), nonce: randomUUID() })
-    const waiters = Array.from({ length: 8 }, (_, i) => child(`profile-${i}`))
+test("concurrent contenders: exactly one owns, the rest see it held", async () => {
+    const contenders = Array.from({ length: 8 }, (_, i) =>
+        child(`profile-${i}`),
+    )
     try {
         const outcomes = await Promise.all(
-            waiters.map(async (w) => String((await once(w.stdout, "data"))[0])),
+            contenders.map(async (c) =>
+                String((await once(c.stdout, "data"))[0]),
+            ),
         )
         assert.equal(outcomes.filter((o) => o.includes("owned")).length, 1)
-        // The survivor's lock is intact and recorded.
-        assert.equal(typeof readOwner(refreshLockPath()).pid, "number")
+        assert.equal(outcomes.filter((o) => o.includes("held")).length, 7)
     } finally {
-        for (const w of waiters) w.kill("SIGKILL")
+        for (const c of contenders) c.kill("SIGKILL")
     }
 })
 

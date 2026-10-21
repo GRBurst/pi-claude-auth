@@ -7,7 +7,6 @@ import {
     LoginUnusable,
     MIN_VALIDITY_MS,
     REFRESH_BUSY_MESSAGE,
-    STALE_REFRESH_LOCK_MESSAGE,
     type CredentialStoreDeps,
 } from "./credential-store.ts"
 import {
@@ -65,7 +64,6 @@ function makeWorld(initial: ClaudeCredentials | null) {
             if (world.lockHeldByOther) return "held"
             world.lockedByUs = true
             return {
-                recordCli: () => {},
                 release: () => {
                     world.lockedByUs = false
                 },
@@ -184,69 +182,6 @@ test("ensureFresh: a permanently busy lock fails as transient, without spawning"
         return true
     })
     assert.equal(world.refreshRuns, 0)
-})
-
-test("ensureFresh: no CLI launches when its pending record cannot be written", async () => {
-    const { world, deps, store } = makeWorld(EXPIRED)
-    const acquire = deps.acquireRefreshLock
-    deps.acquireRefreshLock = () => {
-        const lock = acquire()
-        if (typeof lock !== "object") return lock
-        return {
-            ...lock,
-            recordCli: () => {
-                throw new Error("disk full")
-            },
-        }
-    }
-    await assert.rejects(store.ensureFresh(SOURCE), /disk full/)
-    assert.equal(world.refreshRuns, 0)
-    assert.equal(world.lockedByUs, false)
-})
-
-test("ensureFresh: an unprovable lock fails fast with the recovery step", async () => {
-    const { world, deps, store } = makeWorld(EXPIRED)
-    let attempts = 0
-    deps.acquireRefreshLock = () => {
-        attempts++
-        return "unprovable"
-    }
-    await assert.rejects(store.ensureFresh(SOURCE), {
-        message: STALE_REFRESH_LOCK_MESSAGE,
-    })
-    assert.equal(attempts, 2, "one re-check skips transient states")
-    assert.equal(world.refreshRuns, 0)
-})
-
-test("ensureFresh: a transient unprovable lock is waited out", async () => {
-    const { world, deps, store } = makeWorld(EXPIRED)
-    const acquire = deps.acquireRefreshLock
-    const answers: ("held" | "unprovable")[] = [
-        "unprovable",
-        "held",
-        "unprovable",
-    ]
-    deps.acquireRefreshLock = () => answers.shift() ?? acquire()
-    assert.equal((await store.ensureFresh(SOURCE)).accessToken, "fresh")
-    assert.equal(world.refreshRuns, 1)
-})
-
-test("ensureFresh: the owner records the spawned CLI in its lock", async () => {
-    const { deps, store } = makeWorld(EXPIRED)
-    const acquire = deps.acquireRefreshLock
-    const recorded: (number | "pending")[] = []
-    deps.acquireRefreshLock = () => {
-        const lock = acquire()
-        if (typeof lock !== "object") return lock
-        return { ...lock, recordCli: (cli) => recorded.push(cli) }
-    }
-    const run = deps.runClaudeRefresh
-    deps.runClaudeRefresh = async (signal, onSpawn) => {
-        onSpawn(4242)
-        await run(signal, onSpawn)
-    }
-    await store.ensureFresh(SOURCE)
-    assert.deepEqual(recorded, ["pending", 4242])
 })
 
 test("ensureFresh: still-expired after the refresh reports an expired login", async () => {
