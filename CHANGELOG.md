@@ -11,6 +11,9 @@
 - Honor pi's cancellation signal while waiting for credentials. An owned refresh
   continues independently through CLI completion and credential re-read; it
   never writes pi's `auth.json` in the background.
+- Honor `CLAUDE_SECURESTORAGE_CONFIG_DIR` and `CLAUDE_CONFIG_DIR` like Claude
+  Code does, for the credentials file and for the refresh coordination
+  directory, so a sandboxed pi with its own Claude config dir can refresh.
 - Share refresh coordination across pi profiles in `~/.claude/pi-claude-auth/`.
   The refresh lock is never taken over: PID liveness proofs are unsound across
   PID namespaces (sandboxed pi sessions), and a wrongly taken-over lock means a

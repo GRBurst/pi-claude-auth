@@ -42,7 +42,7 @@ export const LOGIN_EXPIRED_MESSAGE =
 // so the busy answer carries the recovery step. A healthy refresh ends within
 // CLAUDE_TIMEOUT_MS (1 minute), hence the time bound on the advice.
 export const REFRESH_BUSY_MESSAGE =
-    "A Claude Code credential refresh is still running. Retry in a moment. If this persists for over 2 minutes and no pi or `claude` refresh is running, delete ~/.claude/pi-claude-auth/refresh.lock (its `owner` file shows when it was taken)."
+    "A Claude Code credential refresh is still running. Retry in a moment. If this persists for over 2 minutes and no pi or `claude` refresh is running, delete `refresh.lock` in the `pi-claude-auth` folder of your Claude config dir (`~/.claude` unless CLAUDE_CONFIG_DIR is set); its `owner` file shows when it was taken."
 
 export const CLAUDE_UNAVAILABLE_MESSAGE =
     "Could not run the `claude` CLI to refresh the Claude Code credentials. Make sure it is installed and on PATH."

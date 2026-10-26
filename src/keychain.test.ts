@@ -136,6 +136,11 @@ test("encodeSource: distinguishes accounts under the same service", () => {
 
 // --- Definitive absence vs unreadable ------------------------------------
 
+// These tests resolve ~/.claude from a temporary HOME; an inherited Claude
+// config-dir override would point them at a real directory.
+delete process.env.CLAUDE_CONFIG_DIR
+delete process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR
+
 const prevHome = process.env.HOME
 let homeDir = ""
 

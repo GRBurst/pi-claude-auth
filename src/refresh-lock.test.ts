@@ -16,6 +16,11 @@ import { acquireRefreshLock, refreshLockPath } from "./refresh-lock.ts"
 import { getRefreshLockTarget } from "./paths.ts"
 import { readFutileRefresh, writeFutileRefresh } from "./futile-refresh.ts"
 
+// These tests resolve ~/.claude from a temporary HOME; an inherited Claude
+// config-dir override would point them at a real directory.
+delete process.env.CLAUDE_CONFIG_DIR
+delete process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR
+
 let home: string
 let oldHome: string | undefined
 let oldProfile: string | undefined
@@ -75,6 +80,26 @@ test("same HOME profiles share lock and futile record; an old live lock is held"
     ;(lock as { release(): void }).release()
     assert.equal(existsSync(`${path}.lock`), false)
     assert.equal(readdirSync(join(home, ".claude", "pi-claude-auth")).length, 1)
+})
+
+test("the lock and futile record live in the configured Claude dir, not ~/.claude", () => {
+    const claudeDir = join(home, "elsewhere")
+    process.env.CLAUDE_CONFIG_DIR = claudeDir
+    try {
+        const lock = acquireRefreshLock()
+        assert.equal(typeof lock, "object")
+        writeFutileRefresh({ source: "file", state: "expired" })
+        const coordination = join(claudeDir, "pi-claude-auth")
+        assert.equal(existsSync(join(coordination, "refresh.lock")), true)
+        assert.equal(
+            existsSync(join(coordination, "futile-refresh.json")),
+            true,
+        )
+        assert.equal(existsSync(join(home, ".claude")), false)
+        ;(lock as { release(): void }).release()
+    } finally {
+        delete process.env.CLAUDE_CONFIG_DIR
+    }
 })
 
 test("a dead owner keeps the barrier: death cannot be proven across processes", async () => {

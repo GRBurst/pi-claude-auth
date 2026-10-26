@@ -179,7 +179,11 @@ The extension checks these in order:
 
 1. macOS Keychain (all `Claude Code-credentials*` entries — multiple accounts
    are detected automatically)
-2. `~/.claude/.credentials.json` (fallback, works on all platforms)
+2. `~/.claude/.credentials.json` (fallback, works on all platforms). Like Claude
+   Code, the extension honors `CLAUDE_SECURESTORAGE_CONFIG_DIR`, then
+   `CLAUDE_CONFIG_DIR`, in place of `~/.claude` — for example when pi runs in a
+   sandbox with its own Claude config dir. The refresh lock and futile-attempt
+   record move with it (below, `~/.claude` stands for that directory).
 
 ## Multiple accounts (macOS)
 
@@ -213,7 +217,8 @@ one account is found, the picker is skipped.
 
 ### Refresh-lock recovery
 
-The refresh lock `~/.claude/pi-claude-auth/refresh.lock` never expires and is
+The refresh lock `~/.claude/pi-claude-auth/refresh.lock` (inside your Claude
+config dir, see [credential sources](#credential-sources)) never expires and is
 never taken over. A paused process is not necessarily dead, and a crashed owner
 cannot be proven dead from another process: PIDs mean nothing across sandboxed
 pi sessions (each has its own PID namespace). Stealing a live lock would start a
@@ -226,7 +231,7 @@ is running, stop all pi sessions using the extension, confirm that no delegated
 or orphaned `claude` process is left, then remove the lock and retry:
 
 ```sh
-rm -r ~/.claude/pi-claude-auth/refresh.lock
+rm -r "${CLAUDE_SECURESTORAGE_CONFIG_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}}/pi-claude-auth/refresh.lock"
 ```
 
 Never remove the lock under a running refresh.

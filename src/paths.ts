@@ -51,12 +51,16 @@ export function getClaudeCredentialsPath(): string {
     return join(getClaudeConfigDir(), ".credentials.json")
 }
 
-/** Target name for the per-user non-expiring refresh barrier (`<target>.lock`). */
+/** Target name for the per-Claude-store non-expiring refresh barrier (`<target>.lock`). */
 export function getRefreshLockTarget(): string {
     return join(getClaudeCoordinationDir(), "refresh")
 }
 
-/** Per-user coordination, independent of pi profiles. */
+/**
+ * Per-Claude-store coordination, independent of pi profiles. Lives inside the
+ * Claude config dir so a sandbox that can reach only that dir can still take
+ * the refresh lock.
+ */
 export function getClaudeCoordinationDir(): string {
-    return join(homedir(), ".claude", "pi-claude-auth")
+    return join(getClaudeConfigDir(), "pi-claude-auth")
 }

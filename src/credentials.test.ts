@@ -22,6 +22,11 @@ import {
 } from "./credentials.ts"
 import { readAllClaudeAccounts } from "./keychain.ts"
 
+// These tests resolve ~/.claude from a temporary HOME; an inherited Claude
+// config-dir override would point them at a real directory.
+delete process.env.CLAUDE_CONFIG_DIR
+delete process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR
+
 let dir = ""
 let prevEnv: string | undefined
 let prevHome: string | undefined

@@ -13,7 +13,9 @@ pi extension that reads Claude Code OAuth credentials. Requires pi 0.85+.
   refresh lock through command completion and authoritative re-read. No
   background `auth.json` writes or canceled-caller account switching.
 - **Refresh coordination is per Claude store, not per pi profile.** Lock and
-  futile-attempt record live in `~/.claude/pi-claude-auth/`. The lock is
+  futile-attempt record live in `pi-claude-auth/` inside the Claude config
+  dir (`~/.claude` unless `CLAUDE_CONFIG_DIR` or
+  `CLAUDE_SECURESTORAGE_CONFIG_DIR` is set). The lock is
   never taken over and never expires: no cross-process proof of owner death
   exists (pi sessions may run in separate PID namespaces, so recorded PIDs are
   meaningless to other processes). A crashed owner strands it; recovery is

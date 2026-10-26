@@ -5,6 +5,7 @@ import { afterEach, test } from "node:test"
 import {
     getAuthJsonPath,
     getClaudeConfigDir,
+    getClaudeCoordinationDir,
     getClaudeCredentialsPath,
     getPiAgentDir,
 } from "./paths.ts"
@@ -67,4 +68,31 @@ test("getClaudeCredentialsPath: resolves under the Claude config dir", () => {
     delete process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR
     process.env.CLAUDE_CONFIG_DIR = "/tmp/claude-agents"
     assert.equal(getClaudeCredentialsPath(), "/tmp/claude-agents/.credentials.json")
+})
+
+test("getClaudeCoordinationDir: defaults to ~/.claude/pi-claude-auth", () => {
+    delete process.env.CLAUDE_CONFIG_DIR
+    delete process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR
+    assert.equal(
+        getClaudeCoordinationDir(),
+        join(homedir(), ".claude", "pi-claude-auth"),
+    )
+})
+
+test("getClaudeCoordinationDir: follows CLAUDE_CONFIG_DIR", () => {
+    delete process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR
+    process.env.CLAUDE_CONFIG_DIR = "/tmp/claude-agents"
+    assert.equal(
+        getClaudeCoordinationDir(),
+        "/tmp/claude-agents/pi-claude-auth",
+    )
+})
+
+test("getClaudeCoordinationDir: CLAUDE_SECURESTORAGE_CONFIG_DIR wins over CLAUDE_CONFIG_DIR", () => {
+    process.env.CLAUDE_CONFIG_DIR = "/tmp/claude-config"
+    process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = "/tmp/claude-secure"
+    assert.equal(
+        getClaudeCoordinationDir(),
+        "/tmp/claude-secure/pi-claude-auth",
+    )
 })
